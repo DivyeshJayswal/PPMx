@@ -342,6 +342,16 @@ export default function WizardLayout() {
     }
   };
 
+  const handleSampleDataLoaded = (_file: File, resp: DatasetUploadResponse) => {
+    const dm = resp.detected_mapping ?? {};
+    setManualMapping({
+      case_id: dm.case_id ?? "",
+      activity: dm.activity ?? "",
+      timestamp: dm.timestamp ?? "",
+      resource: dm.resource ?? null,
+    });
+  };
+
   const clearUpload = () => {
     setUploadedFile(null);
     setDataset(null);
@@ -592,6 +602,7 @@ export default function WizardLayout() {
                     onModeChange={setDatasetMode}
                     splitConfig={splitConfig}
                     onSplitConfigChange={setSplitConfig}
+                    onSampleDataLoaded={handleSampleDataLoaded}
                   />
                 )}
 
