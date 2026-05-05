@@ -8,7 +8,7 @@ type UploadDropzoneProps = {
 
 export default function UploadDropzone({
   onFileSelect,
-  accept = ".csv,.xes",
+  accept = ".csv,.xes,.xes.gz",
   disabled = false,
 }: UploadDropzoneProps) {
   const [isDragging, setIsDragging] = useState(false);

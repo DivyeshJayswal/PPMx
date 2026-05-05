@@ -3,6 +3,7 @@ import os
 import tempfile
 import traceback
 import unittest
+import gzip
 from datetime import datetime
 from pathlib import Path
 import uuid
@@ -770,9 +771,29 @@ class PipelineUnitTests(unittest.TestCase):
         try:
             try:
                 import pm4py  # noqa: F401
+                from conv_and_viz.xes_to_csv import convert_xes_to_csv
             except Exception:
                 self._record(name, True)
                 return
+            xes_payload = """<?xml version="1.0" encoding="UTF-8" ?>
+<log xes.version="1.0" xes.features="nested-attributes" openxes.version="1.0RC7" xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="case-1"/>
+    <event>
+      <string key="concept:name" value="A"/>
+      <date key="time:timestamp" value="2024-01-01T00:00:00.000+00:00"/>
+    </event>
+  </trace>
+</log>
+"""
+            with tempfile.TemporaryDirectory() as tmpdir:
+                xes_path = Path(tmpdir) / "compressed_log.xes"
+                with gzip.open(xes_path, "wt", encoding="utf-8") as handle:
+                    handle.write(xes_payload)
+                csv_path, df, _ = convert_xes_to_csv(str(xes_path), tmpdir)
+                self.assertTrue(Path(csv_path).exists())
+                self.assertFalse(df.empty)
+                self.assertIn("concept:name", df.columns)
             self._record(name, True)
         except Exception as exc:
             self._record(name, False, str(exc))

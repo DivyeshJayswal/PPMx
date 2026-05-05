@@ -97,6 +97,15 @@ def _utc_now() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
+def _detect_upload_format(filename: str) -> str:
+    lower = filename.lower()
+    if lower.endswith(".csv"):
+        return "csv"
+    if lower.endswith(".xes") or lower.endswith(".xes.gz"):
+        return "xes"
+    return ""
+
+
 # -----------------------------------------------------------------------------
 # Column detection / standardization
 # -----------------------------------------------------------------------------
@@ -415,9 +424,9 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
     parses it, detects column mapping, and writes metadata to backend/storage/datasets/<dataset_id>/meta.json
     """
     filename = file.filename or "dataset.csv"
-    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    ext = _detect_upload_format(filename)
     if ext not in {"csv", "xes"}:
-        raise HTTPException(status_code=400, detail="Only CSV or XES files are supported.")
+        raise HTTPException(status_code=400, detail="Only CSV, XES, or XES.GZ files are supported.")
     if preprocessed and ext != "csv":
         raise HTTPException(status_code=400, detail="Preprocessed uploads must be CSV.")
 
@@ -445,6 +454,10 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
                 out.write(chunk)
     finally:
         await file.close()
+
+    if size == 0:
+        shutil.rmtree(ds_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     # Parse / convert
     try:
@@ -501,7 +514,7 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
     meta = DatasetMeta(
         dataset_id=dataset_id,
         stored_path=stored_path,
-        raw_path=stored_path,
+        raw_path=raw_path,
         preprocessed_path=None,
         split_dataset_path=None,
         split_paths=None,

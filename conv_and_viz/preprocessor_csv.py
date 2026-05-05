@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
+from conv_and_viz.xes_to_csv import load_event_log, log_to_dataframe_preserve_all
 
 try:
     import pm4py
@@ -46,11 +47,12 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
             if key in default_options and value is not None:
                 default_options[key] = bool(value)
 
-    if input_path.endswith('.xes'):
+    lower_input_path = input_path.lower()
+    if lower_input_path.endswith(".xes") or lower_input_path.endswith(".xes.gz"):
         if not PM4PY_AVAILABLE:
             raise ImportError("PM4Py is required to process XES files. Install with: pip install pm4py")
-        log = pm4py.read_xes(input_path)
-        df = pm4py.convert_to_dataframe(log)
+        log = load_event_log(input_path)
+        df = log_to_dataframe_preserve_all(log)
     else:
         df = pd.read_csv(input_path)
     

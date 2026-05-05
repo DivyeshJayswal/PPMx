@@ -43,10 +43,19 @@ function formatBytes(bytes: number): string {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-function getExt(name: string): string {
-  const i = name.lastIndexOf(".");
+function getDatasetFormat(name: string): "csv" | "xes" | null {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".csv")) return "csv";
+  if (lower.endsWith(".xes") || lower.endsWith(".xes.gz")) return "xes";
+  return null;
+}
+
+function getDisplayExt(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".xes.gz")) return "xes.gz";
+  const i = lower.lastIndexOf(".");
   if (i === -1) return "";
-  return name.slice(i + 1).toLowerCase();
+  return lower.slice(i + 1);
 }
 
 export default function Step1Upload({
@@ -219,13 +228,13 @@ export default function Step1Upload({
       return;
     }
 
-    const ext = getExt(file.name);
-    if (ext !== "csv" && ext !== "xes") {
-      setError("Unsupported format. Please upload a CSV or XES file.");
+    const detectedFormat = getDatasetFormat(file.name);
+    if (!detectedFormat) {
+      setError("Unsupported format. Please upload a CSV, XES, or XES.GZ file.");
       return;
     }
-    if (ext !== format) {
-      setError(`Selected format is ${format.toUpperCase()}, but you uploaded a .${ext} file.`);
+    if (detectedFormat !== format) {
+      setError(`Selected format is ${format.toUpperCase()}, but you uploaded a .${getDisplayExt(file.name)} file.`);
       return;
     }
 
@@ -401,7 +410,7 @@ export default function Step1Upload({
                   <div className="mt-3">
                     <UploadDropzone
                       onFileSelect={handleUpload}
-                      accept={format === "csv" ? ".csv" : format === "xes" ? ".xes" : ".csv,.xes"}
+                      accept={format === "csv" ? ".csv" : format === "xes" ? ".xes,.xes.gz" : ".csv,.xes,.xes.gz"}
                       disabled={!format}
                     />
                   </div>

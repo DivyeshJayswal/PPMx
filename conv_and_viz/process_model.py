@@ -6,11 +6,13 @@ from pm4py.algo.discovery.dfg import algorithm as dfg_discovery
 from pm4py.visualization.dfg import visualizer as dfg_visualizer
 from pm4py.objects.conversion.process_tree import converter as pt_converter
 from pm4py.visualization.petri_net import visualizer as pn_visualizer
+from conv_and_viz.xes_utils import normalized_xes_path
 
 
 def load_event_log(xes_path: str):
     """Load an XES event log file."""
-    return xes_importer.apply(xes_path)
+    with normalized_xes_path(xes_path) as import_path:
+        return xes_importer.apply(import_path)
 
 
 def ensure_output_folder(folder_path: str):
