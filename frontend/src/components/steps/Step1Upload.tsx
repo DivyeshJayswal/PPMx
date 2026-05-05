@@ -22,6 +22,7 @@ type Step1UploadProps = {
   onUploaded: (file: File, dataset: DatasetUploadResponse) => void;
   onDatasetUpdate?: (dataset: DatasetUploadResponse) => void;
   onClear?: () => void;
+  onSampleDataLoaded?: (file: File, dataset: DatasetUploadResponse) => void;
 };
 
 const MAX_UPLOAD_MB = 400;
@@ -68,11 +69,14 @@ export default function Step1Upload({
   onUploaded,
   onDatasetUpdate,
   onClear,
+  onSampleDataLoaded,
 }: Step1UploadProps) {
   const [isUploading, setIsUploading] = useState(false);
   const [isPreprocessing, setIsPreprocessing] = useState(false);
   const [isGeneratingSplits, setIsGeneratingSplits] = useState(false);
   const [isUploadingSplits, setIsUploadingSplits] = useState(false);
+  const [isSampleLoading, setIsSampleLoading] = useState(false);
+  const [sampleError, setSampleError] = useState<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [preprocessError, setPreprocessError] = useState<string | null>(null);
@@ -250,6 +254,37 @@ export default function Step1Upload({
     }
   };
 
+  const handleSampleData = async () => {
+    setSampleError(null);
+    setIsSampleLoading(true);
+    try {
+      const response = await fetch("/BPI_2020_Log_PrepaidTravelCost.csv");
+      if (!response.ok) throw new Error("Could not fetch sample dataset from public folder.");
+      const blob = await response.blob();
+      const file = new File([blob], "BPI_2020_Log_PrepaidTravelCost.csv", { type: "text/csv" });
+
+      const uploaded = await uploadDataset(file, { preprocessed: false });
+      const preprocessed = await preprocessDataset(uploaded.dataset_id, {
+        sort_and_normalize_timestamps: true,
+        check_millisecond_order: true,
+        impute_categorical: true,
+        impute_numeric_neighbors: true,
+        drop_missing_timestamps: true,
+        fill_remaining_missing: true,
+        remove_duplicates: true,
+      });
+      const withSplits = await generateSplits(preprocessed.dataset_id, splitConfig);
+
+      onModeChange("raw");
+      onUploaded(file, withSplits);
+      onSampleDataLoaded?.(file, withSplits);
+    } catch (e) {
+      setSampleError(e instanceof Error ? e.message : "Failed to load sample data.");
+    } finally {
+      setIsSampleLoading(false);
+    }
+  };
+
   const handlePreprocess = async () => {
     if (!dataset) return;
     setPreprocessError(null);
@@ -313,6 +348,33 @@ export default function Step1Upload({
         <p className="text-sm text-brand-600">
           Choose how you want to provide data: raw upload, preprocessed upload, or your own splits.
         </p>
+      </div>
+
+      <div className="border border-brand-300 bg-brand-50 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-brand-800">BPM 2026 Conference Demo</div>
+          <div className="text-xs text-brand-600 mt-0.5">
+            Load the BPI 2020 PrepaidTravelCost event log — columns auto-mapped, splits ready in one click.
+          </div>
+        </div>
+        <div className="flex flex-col items-start sm:items-end gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={handleSampleData}
+            disabled={isSampleLoading || !!dataset}
+            className={[
+              "px-4 py-2 rounded-md text-sm font-medium border transition",
+              isSampleLoading || !!dataset
+                ? "border-gray-300 bg-gray-100 text-gray-400 cursor-not-allowed"
+                : "border-brand-500 bg-brand-600 text-white hover:bg-brand-700",
+            ].join(" ")}
+          >
+            {isSampleLoading ? "Loading sample…" : "Try Sample Data"}
+          </button>
+          {sampleError && (
+            <div className="text-xs text-red-600 max-w-xs text-right">{sampleError}</div>
+          )}
+        </div>
       </div>
 
       <Card>
