@@ -186,6 +186,56 @@ def detect_and_standardize_columns(
     return df, column_mapping
 
 
+def _detect_original_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
+    """
+    Detect likely event-log columns without renaming them.
+
+    Returns keys expected by the frontend mapping UI:
+      - case_id
+      - activity
+      - timestamp
+      - resource (optional)
+    """
+    detected: Dict[str, str] = {}
+
+    case_patterns = [
+        "case:id", "case:concept:name", "CaseID", "case_id", "caseid", "Case ID", "Case_ID"
+    ]
+    activity_patterns = [
+        "concept:name", "Action", "activity", "event", "Event", "task", "Task", "Activity"
+    ]
+    timestamp_patterns = [
+        "time:timestamp", "Timestamp", "timestamp", "time", "Time", "start_time",
+        "StartTime", "complete_time", "CompleteTime"
+    ]
+    resource_patterns = [
+        "org:resource", "Resource", "resource", "user", "User", "org:role",
+        "role", "Role", "actor", "Actor"
+    ]
+
+    for col in df.columns:
+        if col in case_patterns:
+            detected["case_id"] = col
+            break
+
+    for col in df.columns:
+        if col in activity_patterns:
+            detected["activity"] = col
+            break
+
+    for col in df.columns:
+        if col in timestamp_patterns:
+            detected["timestamp"] = col
+            break
+
+    for col in df.columns:
+        if col in resource_patterns:
+            detected["resource"] = col
+            break
+
+    return detected
+
+
 # -----------------------------------------------------------------------------
 # Pydantic models
 # -----------------------------------------------------------------------------
@@ -492,19 +542,9 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
     df = pd.read_csv(stored_path)
 
     num_events = int(len(df))
-    
-    # Try to detect CaseID for num_cases, but don't rename columns
-    case_col = None
-    case_patterns = ['case:id', 'case:concept:name', 'CaseID', 'case_id', 'caseid', 'Case ID', 'Case_ID']
-    for col in df.columns:
-        if col in case_patterns:
-            case_col = col
-            break
-    
-    if case_col:
-        num_cases = int(df[case_col].nunique())
-    else:
-        num_cases = 0  # Unknown until column mapping
+    detected_mapping = _detect_original_column_mapping(df)
+    case_col = detected_mapping.get("case_id")
+    num_cases = int(df[case_col].nunique()) if case_col else 0
 
     preview_rows = df.head(20).to_dict(orient="records")
     column_types = _infer_column_types(df)
@@ -527,7 +567,7 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
         num_cases=num_cases,
         columns=list(df.columns),
         column_types=column_types,
-        detected_mapping={},  # No auto-detection
+        detected_mapping=detected_mapping,
         created_at=_utc_now(),
     )
     if preprocessed:
@@ -550,7 +590,7 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
         num_cases=num_cases,
         columns=list(df.columns),
         column_types=column_types,
-        detected_mapping={},  # No auto-detection - user will choose later
+        detected_mapping=detected_mapping,
         preview=preview_rows,
     )
 
@@ -580,17 +620,9 @@ def preprocess_dataset(dataset_id: str, options: PreprocessOptions):
 
     num_events = int(len(df))
 
-    case_col = None
-    case_patterns = ['case:id', 'case:concept:name', 'CaseID', 'case_id', 'caseid', 'Case ID', 'Case_ID']
-    for col in df.columns:
-        if col in case_patterns:
-            case_col = col
-            break
-
-    if case_col:
-        num_cases = int(df[case_col].nunique())
-    else:
-        num_cases = 0
+    detected_mapping = _detect_original_column_mapping(df)
+    case_col = detected_mapping.get("case_id")
+    num_cases = int(df[case_col].nunique()) if case_col else 0
 
     preview_rows = df.head(20).to_dict(orient="records")
     column_types = _infer_column_types(df)
@@ -612,7 +644,7 @@ def preprocess_dataset(dataset_id: str, options: PreprocessOptions):
         num_cases=num_cases,
         columns=list(df.columns),
         column_types=column_types,
-        detected_mapping=meta.detected_mapping,
+        detected_mapping=detected_mapping or meta.detected_mapping,
         created_at=meta.created_at,
     )
     _write_json(_dataset_meta_path(dataset_id), updated_meta.model_dump())
@@ -632,7 +664,7 @@ def preprocess_dataset(dataset_id: str, options: PreprocessOptions):
         num_cases=num_cases,
         columns=list(df.columns),
         column_types=column_types,
-        detected_mapping=meta.detected_mapping,
+        detected_mapping=detected_mapping or meta.detected_mapping,
         preview=preview_rows,
     )
 

@@ -145,6 +145,25 @@ class PipelineUnitTests(unittest.TestCase):
             self._record(name, False, str(exc))
             raise
 
+    def test_detect_original_column_mapping(self):
+        name = "detect_original_column_mapping"
+        try:
+            df = pd.DataFrame({
+                "case:concept:name": ["1", "1", "2"],
+                "concept:name": ["A", "B", "C"],
+                "time:timestamp": ["2024-01-01", "2024-01-02", "2024-01-03"],
+                "org:resource": ["R1", "R2", "R1"],
+            })
+            detected = backend_main._detect_original_column_mapping(df)
+            self.assertEqual(detected["case_id"], "case:concept:name")
+            self.assertEqual(detected["activity"], "concept:name")
+            self.assertEqual(detected["timestamp"], "time:timestamp")
+            self.assertEqual(detected["resource"], "org:resource")
+            self._record(name, True)
+        except Exception as exc:
+            self._record(name, False, str(exc))
+            raise
+
     def test_preprocess_event_log_csv(self):
         name = "preprocess_event_log_csv"
         try:

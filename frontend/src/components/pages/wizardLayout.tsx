@@ -139,6 +139,16 @@ function validateManualMapping(m: ManualMapping): boolean {
   return new Set(selected).size === selected.length;
 }
 
+function mappingFromDetected(resp: DatasetUploadResponse): ManualMapping {
+  const dm = resp.detected_mapping ?? {};
+  return {
+    case_id: dm.case_id ?? "",
+    activity: dm.activity ?? "",
+    timestamp: dm.timestamp ?? "",
+    resource: dm.resource ?? null,
+  };
+}
+
 function validateTransformerConfig(cfg: TransformerConfig): boolean {
   const positiveInts = [
     cfg.max_len,
@@ -253,8 +263,8 @@ export default function WizardLayout() {
   const prevStep = () => setStep((prev) => Math.max(prev - 1, 0));
 
   /* -------------------- VALIDATION -------------------- */
-  const isStepValid = () => {
-    switch (step) {
+  const isStepValid = (stepIndex = step) => {
+    switch (stepIndex) {
       case 0:
         return dataset !== null && !!dataset.split_paths;
       case 1:
@@ -293,14 +303,14 @@ export default function WizardLayout() {
   };
 
   const completedSteps = [
-    dataset !== null && !!dataset.split_paths,
-    !!dataset && validateManualMapping(manualMapping),
-    modelTypeNormalized !== null,
-    configMode !== null,
-    taskNormalized !== null,
-    explainMethod !== null,
-    pipelineStatus === "completed",
-    viewMode === "results",
+    0 < step && isStepValid(0),
+    1 < step && isStepValid(1),
+    2 < step && isStepValid(2),
+    3 < step && isStepValid(3),
+    4 < step && isStepValid(4),
+    5 < step && isStepValid(5),
+    6 < step && isStepValid(6),
+    7 < step && isStepValid(7),
   ];
 
   /* -------------------- HANDLERS -------------------- */
@@ -308,7 +318,7 @@ export default function WizardLayout() {
     setUploadedFile(file);
     setDataset(resp);
     setMappingMode("manual");
-    setManualMapping({ case_id: "", activity: "", timestamp: "", resource: null });
+    setManualMapping(mappingFromDetected(resp));
 
     // clear run state
     setPipelineStatus("idle");
@@ -325,12 +335,18 @@ export default function WizardLayout() {
     setDataset(resp);
     setManualMapping((prev) => {
       const cols = resp.columns ?? [];
+      const detected = mappingFromDetected(resp);
       const next = { ...prev };
 
       if (next.case_id && !cols.includes(next.case_id)) next.case_id = "";
       if (next.activity && !cols.includes(next.activity)) next.activity = "";
       if (next.timestamp && !cols.includes(next.timestamp)) next.timestamp = "";
       if (next.resource && !cols.includes(next.resource)) next.resource = null;
+
+      if (!next.case_id && detected.case_id) next.case_id = detected.case_id;
+      if (!next.activity && detected.activity) next.activity = detected.activity;
+      if (!next.timestamp && detected.timestamp) next.timestamp = detected.timestamp;
+      if (!next.resource && detected.resource) next.resource = detected.resource;
 
       return next;
     });
@@ -343,13 +359,7 @@ export default function WizardLayout() {
   };
 
   const handleSampleDataLoaded = (_file: File, resp: DatasetUploadResponse) => {
-    const dm = resp.detected_mapping ?? {};
-    setManualMapping({
-      case_id: dm.case_id ?? "",
-      activity: dm.activity ?? "",
-      timestamp: dm.timestamp ?? "",
-      resource: dm.resource ?? null,
-    });
+    setManualMapping(mappingFromDetected(resp));
   };
 
   const clearUpload = () => {
