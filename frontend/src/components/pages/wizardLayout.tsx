@@ -36,7 +36,7 @@ const TOTAL_STEPS = 8;
 export type PipelineStatus = "idle" | "running" | "completed";
 export type ViewMode = "wizard" | "results";
 
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 
 function cleanLogLine(line: string): string {
   return line.replace(ANSI_RE, "").replace(/\r/g, "").trim();
@@ -550,7 +550,7 @@ export default function WizardLayout() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [pipelineStatus, runId]);
+  }, [autoDownloadedRunId, pipelineStatus, runId]);
 
   /* -------------------- RENDER -------------------- */
   const showResults = viewMode === "results";

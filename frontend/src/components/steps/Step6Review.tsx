@@ -1,4 +1,6 @@
 // frontend/src/components/steps/Step6Review.tsx
+import { useEffect, useState } from "react";
+
 import type { DatasetUploadResponse, RunStatus } from "../../lib/api";
 import { artifactUrl } from "../../lib/api";
 
@@ -75,6 +77,16 @@ export default function Step6Review({
   onStartPipeline,
   onViewResults,
 }: Step6ReviewProps) {
+  const [renderedAt, setRenderedAt] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (pipelineStatus !== "running") return;
+    const interval = window.setInterval(() => {
+      setRenderedAt(Date.now());
+    }, 30000);
+    return () => window.clearInterval(interval);
+  }, [pipelineStatus]);
+
   const datasetName = uploadedFile?.name ?? "-";
   const datasetId = dataset?.dataset_id ?? "-";
   const events = dataset?.num_events ?? null;
@@ -96,7 +108,7 @@ export default function Step6Review({
     if (!startedAt) return null;
     const started = Date.parse(startedAt);
     if (!Number.isFinite(started)) return null;
-    const elapsedMs = Date.now() - started;
+    const elapsedMs = renderedAt - started;
     if (elapsedMs <= 0) return null;
     const remainingMs = (elapsedMs * (100 - progress)) / progress;
     return Math.max(1, Math.ceil(remainingMs / 60000));

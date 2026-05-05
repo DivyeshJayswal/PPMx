@@ -510,7 +510,7 @@ class PipelineUnitTests(unittest.TestCase):
                 })
                 df.to_csv(csv_path, index=False)
                 sorted_df = prefix_generation.load_and_sort_log(Path(csv_path))
-                self.assertEqual(sorted_df.iloc[0]["CaseID"], "1")
+                self.assertEqual(str(sorted_df.iloc[0]["CaseID"]), "1")
                 self.assertLessEqual(sorted_df.iloc[0]["Timestamp"], sorted_df.iloc[1]["Timestamp"])
             self._record(name, True)
         except Exception as exc:
@@ -593,7 +593,10 @@ class PipelineUnitTests(unittest.TestCase):
                 [np.array([[1, 2, 0], [2, 3, 4]]), np.zeros((2, 3))],
                 verbose=0
             )
-            self.assertEqual(out_time.shape, (2, 1))
+            self.assertIsInstance(out_time, list)
+            self.assertEqual(len(out_time), 2)
+            self.assertEqual(out_time[0].shape, (2, 1))
+            self.assertEqual(out_time[1].shape, (2, 3))
             self._record(name, True)
         except Exception as exc:
             self._record(name, False, str(exc))

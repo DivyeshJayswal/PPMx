@@ -138,7 +138,6 @@ export default function Step1Upload({
       Math.min(nextValEnd, 100 - MIN_SPLIT_PCT)
     );
 
-    const nextTrainPct = clampedTrain;
     const nextValPct = clampedVal - clampedTrain;
     const nextTestPct = 100 - clampedVal;
 
