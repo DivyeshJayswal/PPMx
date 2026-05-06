@@ -67,6 +67,7 @@ STORAGE_DIR = os.path.join(BACKEND_DIR, "storage")
 UPLOAD_DIR = os.path.join(STORAGE_DIR, "uploads")
 DATASETS_DIR = os.path.join(STORAGE_DIR, "datasets")
 RUNS_DIR = os.path.join(STORAGE_DIR, "runs")
+SAMPLE_DATASETS_DIR = os.path.join(REPO_ROOT, "ppmx_sample_dataset")
 
 for d in (STORAGE_DIR, UPLOAD_DIR, DATASETS_DIR, RUNS_DIR):
     os.makedirs(d, exist_ok=True)
@@ -95,6 +96,45 @@ def _read_json(path: str) -> Any:
 
 def _utc_now() -> str:
     return datetime.utcnow().isoformat() + "Z"
+
+
+def _sample_dataset_path(name: str) -> str:
+    candidate = os.path.abspath(os.path.join(SAMPLE_DATASETS_DIR, name))
+    sample_root = os.path.abspath(SAMPLE_DATASETS_DIR)
+    if os.path.commonpath([sample_root, candidate]) != sample_root:
+        raise HTTPException(status_code=400, detail="Invalid sample dataset path.")
+    if not os.path.isfile(candidate):
+        raise HTTPException(status_code=404, detail="Sample dataset not found.")
+    return candidate
+
+
+def _list_sample_datasets() -> List[Dict[str, Any]]:
+    if not os.path.isdir(SAMPLE_DATASETS_DIR):
+        return []
+
+    datasets: List[Dict[str, Any]] = []
+    for entry in sorted(os.scandir(SAMPLE_DATASETS_DIR), key=lambda item: item.name.lower()):
+        if not entry.is_file():
+            continue
+        lower = entry.name.lower()
+        if lower == "desktop.ini":
+            continue
+        if lower.endswith(".xes.gz"):
+            fmt = "xes"
+        elif lower.endswith(".xes"):
+            fmt = "xes"
+        elif lower.endswith(".csv"):
+            fmt = "csv"
+        else:
+            continue
+        datasets.append(
+            {
+                "name": entry.name,
+                "size_bytes": int(entry.stat().st_size),
+                "format": fmt,
+            }
+        )
+    return datasets
 
 
 def _detect_upload_format(filename: str) -> str:
@@ -256,6 +296,12 @@ class DatasetUploadResponse(BaseModel):
     column_types: Dict[str, str] = Field(default_factory=dict)
     detected_mapping: Dict[str, str]
     preview: List[Dict[str, Any]]
+
+
+class SampleDatasetInfo(BaseModel):
+    name: str
+    size_bytes: int
+    format: str
 
 
 class DatasetMeta(BaseModel):
@@ -593,6 +639,17 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
         detected_mapping=detected_mapping,
         preview=preview_rows,
     )
+
+
+@app.get("/sample-datasets", response_model=List[SampleDatasetInfo])
+def list_sample_datasets():
+    return _list_sample_datasets()
+
+
+@app.get("/sample-datasets/{sample_name}")
+def download_sample_dataset(sample_name: str):
+    sample_path = _sample_dataset_path(sample_name)
+    return FileResponse(sample_path, filename=os.path.basename(sample_path))
 
 
 @app.post("/datasets/{dataset_id}/preprocess", response_model=DatasetUploadResponse)

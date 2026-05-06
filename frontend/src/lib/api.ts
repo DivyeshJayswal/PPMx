@@ -112,6 +112,12 @@ export type SplitConfig = {
   val_split: number;
 };
 
+export type SampleDatasetInfo = {
+  name: string;
+  size_bytes: number;
+  format: "csv" | "xes";
+};
+
 // -----------------------------
 // Low-level helpers
 // -----------------------------
@@ -162,6 +168,15 @@ export async function uploadDataset(
   });
 
   return (await res.json()) as DatasetUploadResponse;
+}
+
+export async function listSampleDatasets(): Promise<SampleDatasetInfo[]> {
+  const res = await apiFetch(`${API_BASE}/sample-datasets`);
+  return (await res.json()) as SampleDatasetInfo[];
+}
+
+export function sampleDatasetUrl(name: string): string {
+  return `${API_BASE}/sample-datasets/${encodeURIComponent(name)}`;
 }
 
 export async function getDataset(dataset_id: string): Promise<DatasetMeta> {

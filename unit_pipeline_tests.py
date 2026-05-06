@@ -237,6 +237,32 @@ class PipelineUnitTests(unittest.TestCase):
             self._record(name, False, str(exc))
             raise
 
+    def test_list_sample_datasets(self):
+        name = "list_sample_datasets"
+        original_dir = backend_main.SAMPLE_DATASETS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                pd.DataFrame({"a": [1]}).to_csv(os.path.join(tmpdir, "sample.csv"), index=False)
+                with open(os.path.join(tmpdir, "sample.xes"), "w", encoding="utf-8") as handle:
+                    handle.write("<log></log>")
+                with open(os.path.join(tmpdir, "desktop.ini"), "w", encoding="utf-8") as handle:
+                    handle.write("[.ShellClassInfo]")
+
+                backend_main.SAMPLE_DATASETS_DIR = tmpdir
+                datasets = backend_main._list_sample_datasets()
+
+                self.assertEqual(len(datasets), 2)
+                self.assertEqual(datasets[0]["name"], "sample.csv")
+                self.assertEqual(datasets[0]["format"], "csv")
+                self.assertEqual(datasets[1]["name"], "sample.xes")
+                self.assertEqual(datasets[1]["format"], "xes")
+            self._record(name, True)
+        except Exception as exc:
+            self._record(name, False, str(exc))
+            raise
+        finally:
+            backend_main.SAMPLE_DATASETS_DIR = original_dir
+
     def test_run_path_helpers(self):
         name = "run_path_helpers"
         try:

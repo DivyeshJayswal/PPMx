@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import Card from "../ui/card";
 import UploadDropzone from "../ui/UploadDropZone";
-import type { DatasetUploadResponse, SplitConfig } from "../../lib/api";
+import type { DatasetUploadResponse, SampleDatasetInfo, SplitConfig } from "../../lib/api";
 import {
   generateSplits,
+  listSampleDatasets,
   preprocessedDatasetUrl,
   preprocessDataset,
+  sampleDatasetUrl,
   splitDownloadUrl,
   uploadDataset,
   uploadSplitsNewDataset,
@@ -77,6 +79,8 @@ export default function Step1Upload({
   const [isUploadingSplits, setIsUploadingSplits] = useState(false);
   const [isSampleLoading, setIsSampleLoading] = useState(false);
   const [sampleError, setSampleError] = useState<string | null>(null);
+  const [sampleDatasets, setSampleDatasets] = useState<SampleDatasetInfo[]>([]);
+  const [selectedSample, setSelectedSample] = useState("");
 
   const [error, setError] = useState<string | null>(null);
   const [preprocessError, setPreprocessError] = useState<string | null>(null);
@@ -197,6 +201,30 @@ export default function Step1Upload({
     setTestSplit(null);
   }, [mode]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSamples = async () => {
+      try {
+        const items = await listSampleDatasets();
+        if (cancelled) return;
+        setSampleDatasets(items);
+        setSelectedSample((prev) => {
+          if (prev && items.some((item) => item.name === prev)) return prev;
+          return items[0]?.name ?? "";
+        });
+      } catch (e) {
+        if (cancelled) return;
+        setSampleError(e instanceof Error ? e.message : "Failed to load sample dataset list.");
+      }
+    };
+
+    loadSamples();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleClear = () => {
     setError(null);
     setPreprocessError(null);
@@ -255,12 +283,19 @@ export default function Step1Upload({
 
   const handleSampleData = async () => {
     setSampleError(null);
+    if (!selectedSample) {
+      setSampleError("Select a sample dataset first.");
+      return;
+    }
     setIsSampleLoading(true);
     try {
-      const response = await fetch("/BPI_2020_Log_PrepaidTravelCost.csv");
-      if (!response.ok) throw new Error("Could not fetch sample dataset from public folder.");
+      const response = await fetch(sampleDatasetUrl(selectedSample));
+      if (!response.ok) throw new Error("Could not fetch sample dataset from server.");
       const blob = await response.blob();
-      const file = new File([blob], "BPI_2020_Log_PrepaidTravelCost.csv", { type: "text/csv" });
+      const type = selectedSample.toLowerCase().endsWith(".csv")
+        ? "text/csv"
+        : "application/octet-stream";
+      const file = new File([blob], selectedSample, { type });
 
       const uploaded = await uploadDataset(file, { preprocessed: false });
       const preprocessed = await preprocessDataset(uploaded.dataset_id, {
@@ -351,24 +386,40 @@ export default function Step1Upload({
 
       <div className="border border-brand-300 bg-brand-50 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-brand-800">BPM 2026 Conference Demo</div>
+          <div className="text-sm font-semibold text-brand-800">Try A Sample Dataset</div>
           <div className="text-xs text-brand-600 mt-0.5">
-            Load the BPI 2020 PrepaidTravelCost event log — columns auto-mapped, splits ready in one click.
+            Choose any raw dataset from the list.
           </div>
         </div>
-        <div className="flex flex-col items-start sm:items-end gap-1 shrink-0">
+        <div className="flex flex-col items-start sm:items-end gap-2 shrink-0 sm:min-w-80">
+          <select
+            value={selectedSample}
+            onChange={(e) => setSelectedSample(e.target.value)}
+            disabled={isSampleLoading || !!dataset || sampleDatasets.length === 0}
+            className="w-full rounded-md border border-brand-200 bg-white px-3 py-2 text-sm text-gray-800 disabled:bg-gray-100 disabled:text-gray-400"
+          >
+            {sampleDatasets.length === 0 ? (
+              <option value="">No sample datasets available</option>
+            ) : (
+              sampleDatasets.map((item) => (
+                <option key={item.name} value={item.name}>
+                  {item.name} ({item.format.toUpperCase()}, {formatBytes(item.size_bytes)})
+                </option>
+              ))
+            )}
+          </select>
           <button
             type="button"
             onClick={handleSampleData}
-            disabled={isSampleLoading || !!dataset}
+            disabled={isSampleLoading || !!dataset || !selectedSample}
             className={[
-              "px-4 py-2 rounded-md text-sm font-medium border transition",
-              isSampleLoading || !!dataset
+              "px-4 py-2 rounded-md text-sm font-medium border transition w-full sm:w-auto",
+              isSampleLoading || !!dataset || !selectedSample
                 ? "border-gray-300 bg-gray-100 text-gray-400 cursor-not-allowed"
                 : "border-brand-500 bg-brand-600 text-white hover:bg-brand-700",
             ].join(" ")}
           >
-            {isSampleLoading ? "Loading sample…" : "Try Sample Data"}
+            {isSampleLoading ? "Loading sample..." : "Load Sample Dataset"}
           </button>
           {sampleError && (
             <div className="text-xs text-red-600 max-w-xs text-right">{sampleError}</div>
