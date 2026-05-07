@@ -90,7 +90,7 @@ export default function Step4Explainability({
       {!modelType ? (
         <Card>
           <div className="p-6 text-sm text-gray-700">
-            Please select a model type in Step 3 first.
+            Please select a model type in Step 2 first.
           </div>
         </Card>
       ) : (

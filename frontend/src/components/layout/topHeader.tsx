@@ -3,8 +3,7 @@ type TopHeaderProps = {
 };
 
 const STEP_TITLES = [
-  "Dataset Setup",
-  "Column Mapping",
+  "Dataset Setup & Mapping",
   "Select Model Type",
   "Model Configuration",
   "Prediction Task",

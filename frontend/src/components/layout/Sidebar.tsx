@@ -4,8 +4,7 @@ type SidebarProps = {
 };
 
 const STEPS = [
-  "Dataset Setup",
-  "Column Mapping",
+  "Dataset Setup & Mapping",
   "Select Model Type",
   "Model Configuration",
   "Select Prediction Task",

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import Card from "../ui/card";
 import UploadDropzone from "../ui/UploadDropZone";
+import Step2Mapping, { type ManualMapping } from "./Step2Mapping";
 import type { DatasetUploadResponse, SampleDatasetInfo, SplitConfig } from "../../lib/api";
 import {
   generateSplits,
@@ -25,6 +26,8 @@ type Step1UploadProps = {
   onDatasetUpdate?: (dataset: DatasetUploadResponse) => void;
   onClear?: () => void;
   onSampleDataLoaded?: (file: File, dataset: DatasetUploadResponse) => void;
+  manualMapping: ManualMapping;
+  onManualMappingChange: (patch: Partial<ManualMapping>) => void;
 };
 
 const MAX_UPLOAD_MB = 400;
@@ -61,6 +64,15 @@ function getDisplayExt(name: string): string {
   return lower.slice(i + 1);
 }
 
+function validateManualMapping(mapping: ManualMapping): boolean {
+  const required = [mapping.case_id, mapping.activity, mapping.timestamp];
+  if (required.some((value) => value.trim().length === 0)) return false;
+  const selected = [mapping.case_id, mapping.activity, mapping.timestamp, mapping.resource].filter(
+    (value): value is string => !!value && value.trim().length > 0
+  );
+  return new Set(selected).size === selected.length;
+}
+
 export default function Step1Upload({
   uploadedFile,
   dataset,
@@ -72,6 +84,8 @@ export default function Step1Upload({
   onDatasetUpdate,
   onClear,
   onSampleDataLoaded,
+  manualMapping,
+  onManualMappingChange,
 }: Step1UploadProps) {
   const [isUploading, setIsUploading] = useState(false);
   const [isPreprocessing, setIsPreprocessing] = useState(false);
@@ -374,6 +388,7 @@ export default function Step1Upload({
   const showSplitControls =
     !!dataset &&
     (mode === "preprocessed" || (mode === "raw" && dataset.is_preprocessed));
+  const mappingComplete = validateManualMapping(manualMapping);
 
   return (
     <div className="space-y-8 w-full">
@@ -631,7 +646,20 @@ export default function Step1Upload({
                   )}
                 </div>
 
-                {mode === "raw" && (
+                <Step2Mapping
+                  dataset={dataset}
+                  manualMapping={manualMapping}
+                  onManualMappingChange={onManualMappingChange}
+                  embedded
+                />
+
+                {!mappingComplete && (
+                  <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                    Complete the column mapping above before preprocessing or generating dataset splits.
+                  </div>
+                )}
+
+                {mode === "raw" && mappingComplete && (
                   <div className="bg-white border border-green-200 rounded-md p-4 space-y-3">
                     <div className="font-medium text-gray-800">Preprocessing Options</div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-700">
@@ -763,7 +791,7 @@ export default function Step1Upload({
                   </div>
                 )}
 
-                {showSplitControls && (
+                {showSplitControls && mappingComplete && (
                   <div className="bg-white border border-green-200 rounded-md p-4 space-y-3">
                     <div className="font-medium text-gray-800">Generate Splits</div>
                     <div className="space-y-4 text-sm text-gray-700">

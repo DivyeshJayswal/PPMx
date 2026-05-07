@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Sidebar from "../layout/Sidebar";
 
 import Step1Upload from "../steps/Step1Upload";
-import Step2Mapping, { type ManualMapping, type MappingMode } from "../steps/Step2Mapping";
+import { type ManualMapping, type MappingMode } from "../steps/Step2Mapping";
 import Step2Model from "../steps/Step2Model";
 import Step3Prediction from "../steps/Step3Prediction";
 import Step4Explainability, { type ExplainValue } from "../steps/Step4Explainability";
@@ -31,7 +31,7 @@ import {
   type RunStatus,
 } from "../../lib/api";
 
-const TOTAL_STEPS = 8;
+const TOTAL_STEPS = 7;
 
 export type PipelineStatus = "idle" | "running" | "completed";
 export type ViewMode = "wizard" | "results";
@@ -266,14 +266,10 @@ export default function WizardLayout() {
   const isStepValid = (stepIndex = step) => {
     switch (stepIndex) {
       case 0:
-        return dataset !== null && !!dataset.split_paths;
+        return dataset !== null && !!dataset.split_paths && validateManualMapping(manualMapping);
       case 1:
-        if (!dataset) return false;
-        if (mappingMode === null) return false;
-        return validateManualMapping(manualMapping);
-      case 2:
         return modelTypeNormalized !== null;
-      case 3: {
+      case 2: {
         if (!modelTypeNormalized) return false;
         if (configMode === null) return false;
 
@@ -285,7 +281,7 @@ export default function WizardLayout() {
         }
         return false;
       }
-      case 4:
+      case 3:
         if (!taskNormalized) return false;
         if (taskNormalized === "custom_activity") {
           if (!customTargetColumn) return false;
@@ -293,9 +289,11 @@ export default function WizardLayout() {
           if (dataset.column_types[customTargetColumn] !== "categorical") return false;
         }
         return true;
-      case 5:
+      case 4:
         return explainMethod !== null;
-      case 7:
+      case 5:
+        return pipelineStatus === "completed";
+      case 6:
         return true;
       default:
         return true;
@@ -310,7 +308,6 @@ export default function WizardLayout() {
     4 < step && isStepValid(4),
     5 < step && isStepValid(5),
     6 < step && isStepValid(6),
-    7 < step && isStepValid(7),
   ];
 
   /* -------------------- HANDLERS -------------------- */
@@ -383,7 +380,7 @@ export default function WizardLayout() {
     const nextModel = normalizeModelType(v);
     setModelType(v);
 
-    // Reset Step 5 config when model changes
+    // Reset configuration when model changes
     setConfigMode(null);
     setTransformerConfig(defaultTransformerConfig);
     setGnnConfig(defaultGnnConfig);
@@ -443,11 +440,11 @@ export default function WizardLayout() {
     const task = taskNormalized;
 
     if (!mt) {
-      setRunError("Invalid model type. Please re-select Step 3.");
+      setRunError("Invalid model type. Please re-select Step 2.");
       return;
     }
     if (!task) {
-      setRunError("Invalid prediction task. Please re-select Step 5.");
+      setRunError("Invalid prediction task. Please re-select Step 4.");
       return;
     }
 
@@ -528,7 +525,7 @@ export default function WizardLayout() {
           if (cancelled) return;
           setArtifacts(arts.artifacts);
           setPipelineStatus("completed");
-          setStep(7);
+          setStep(6);
           setViewMode("results");
           if (autoDownloadedRunId !== runId) {
             const link = document.createElement("a");
@@ -590,7 +587,7 @@ export default function WizardLayout() {
             runId={runId}
             onBackToPipeline={() => {
               setViewMode("wizard");
-              setStep(6);
+              setStep(5);
             }}
           />
         ) : (
@@ -613,12 +610,6 @@ export default function WizardLayout() {
                     splitConfig={splitConfig}
                     onSplitConfigChange={setSplitConfig}
                     onSampleDataLoaded={handleSampleDataLoaded}
-                  />
-                )}
-
-                {step === 1 && (
-                  <Step2Mapping
-                    dataset={dataset}
                     manualMapping={manualMapping}
                     onManualMappingChange={(patch) =>
                       setManualMapping((prev) => ({ ...prev, ...patch }))
@@ -626,11 +617,11 @@ export default function WizardLayout() {
                   />
                 )}
 
-                {step === 2 && (
+                {step === 1 && (
                   <Step2Model modelType={modelType} onSelect={handleSelectModelType} />
                 )}
 
-                {step === 3 && (
+                {step === 2 && (
                   <Step5Config
                     modelType={modelTypeNormalized}
                     mode={configMode}
@@ -644,7 +635,7 @@ export default function WizardLayout() {
                   />
                 )}
 
-                {step === 4 && (
+                {step === 3 && (
                   <Step3Prediction
                     task={predictionTask}
                     category={predictionCategory}
@@ -670,7 +661,7 @@ export default function WizardLayout() {
                   />
                 )}
 
-                {step === 5 && (
+                {step === 4 && (
                   <Step4Explainability
                     modelType={modelTypeNormalized}
                     method={explainMethod}
@@ -678,7 +669,7 @@ export default function WizardLayout() {
                   />
                 )}
 
-                {step === 6 && (
+                {step === 5 && (
                   <Step6Review
                     uploadedFile={uploadedFile}
                     dataset={dataset}
@@ -697,7 +688,7 @@ export default function WizardLayout() {
                     error={runError}
                     onStartPipeline={startPipeline}
                     onViewResults={() => {
-                      setStep(7);
+                      setStep(6);
                       setViewMode("results");
                     }}
                   />

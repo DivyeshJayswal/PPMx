@@ -14,6 +14,7 @@ type Step2MappingProps = {
   dataset: DatasetUploadResponse | null;
   manualMapping: ManualMapping;
   onManualMappingChange: (patch: Partial<ManualMapping>) => void;
+  embedded?: boolean;
 };
 
 function uniqueNonEmpty(values: Array<string | null>): boolean {
@@ -25,6 +26,7 @@ export default function Step2Mapping({
   dataset,
   manualMapping,
   onManualMappingChange,
+  embedded = false,
 }: Step2MappingProps) {
   const columns = (dataset?.columns ?? []).filter((c) => c !== "__split");
   const canShowManual = !!dataset;
@@ -40,6 +42,60 @@ export default function Step2Mapping({
       manualMapping.resource,
     ]);
 
+  const mappingCard = !dataset ? (
+    <Card>
+      <div className="p-6 text-sm text-gray-700">Upload a dataset in Step 1 first.</div>
+    </Card>
+  ) : (
+    <div className="space-y-4">
+      {canShowManual && (
+        <Card title={embedded ? "Column Mapping" : "Manual Mapping"}>
+          <div className="space-y-4">
+            <MappingSelect
+              label="Case ID column"
+              value={manualMapping.case_id}
+              columns={["", ...columns]}
+              onChange={(v) => onManualMappingChange({ case_id: v })}
+              placeholder="Select..."
+            />
+            <MappingSelect
+              label="Activity column"
+              value={manualMapping.activity}
+              columns={["", ...columns]}
+              onChange={(v) => onManualMappingChange({ activity: v })}
+              placeholder="Select..."
+            />
+            <MappingSelect
+              label="Timestamp column"
+              value={manualMapping.timestamp}
+              columns={["", ...columns]}
+              onChange={(v) => onManualMappingChange({ timestamp: v })}
+              placeholder="Select..."
+            />
+            <MappingSelect
+              label="Resource column (optional)"
+              value={manualMapping.resource ?? ""}
+              columns={["", ...columns]}
+              onChange={(v) => onManualMappingChange({ resource: v.trim() ? v : null })}
+              placeholder="None"
+            />
+
+            {!manualOk && (
+              <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+                Select Case ID, Activity, and Timestamp columns (must be different). Resource is
+                optional.
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+
+  if (embedded) {
+    return mappingCard;
+  }
+
   return (
     <div className="space-y-8 w-full">
       <div>
@@ -49,55 +105,7 @@ export default function Step2Mapping({
         </p>
       </div>
 
-      {!dataset ? (
-        <Card>
-          <div className="p-6 text-sm text-gray-700">Upload a dataset in Step 1 first.</div>
-        </Card>
-      ) : (
-        <div className="space-y-4">
-          {canShowManual && (
-            <Card title="Manual Mapping">
-              <div className="space-y-4">
-                <MappingSelect
-                  label="Case ID column"
-                  value={manualMapping.case_id}
-                  columns={["", ...columns]}
-                  onChange={(v) => onManualMappingChange({ case_id: v })}
-                  placeholder="Select..."
-                />
-                <MappingSelect
-                  label="Activity column"
-                  value={manualMapping.activity}
-                  columns={["", ...columns]}
-                  onChange={(v) => onManualMappingChange({ activity: v })}
-                  placeholder="Select..."
-                />
-                <MappingSelect
-                  label="Timestamp column"
-                  value={manualMapping.timestamp}
-                  columns={["", ...columns]}
-                  onChange={(v) => onManualMappingChange({ timestamp: v })}
-                  placeholder="Select..."
-                />
-                <MappingSelect
-                  label="Resource column (optional)"
-                  value={manualMapping.resource ?? ""}
-                  columns={["", ...columns]}
-                  onChange={(v) => onManualMappingChange({ resource: v.trim() ? v : null })}
-                  placeholder="None"
-                />
-
-                {!manualOk && (
-                  <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
-                    Select Case ID, Activity, and Timestamp columns (must be different). Resource is
-                    optional.
-                  </div>
-                )}
-              </div>
-            </Card>
-          )}
-        </div>
-      )}
+      {mappingCard}
     </div>
   );
 }
