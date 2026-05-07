@@ -4,3 +4,4 @@ pm4py==2.7.6
 fastapi>=0.110.0
 pydantic>=2.0.0
 python-multipart>=0.0.9
+requests>=2.32.0
