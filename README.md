@@ -29,35 +29,33 @@ This diagram summarizes the frontend-backend structure and the APIs used across 
 Clone the repository first and then follow the steps: 
 1. Create and activate a Python virtual environment.
 ```bash
+#Create Virtual environment
 python -m venv .venv
+
+# Activate Environment 
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
 # macOS/Linux
-# source .venv/bin/activate
+source .venv/bin/activate
 ```
 
-2. Install backend dependencies.
+2. Install dependencies.
 ```bash
-pip install -r backend/requirements.txt
+pip install -r requirements.txt
 ```
 
-3. Start the backend API.
-```bash
-uvicorn backend.main:app --reload --port 8000
-```
-
-4. In a new terminal, install frontend dependencies.
+3. Install frontend dependencies.
 ```bash
 cd frontend
 npm install
 ```
 
-5. Configure the frontend API base URL.
+4. Configure the frontend API base URL.
 ```bash
+# Windows PowerShell
+Copy-Item .env.example .env.local -ErrorAction SilentlyContinue
 # macOS/Linux
 cp .env.example .env.local 2>/dev/null || true
-# Windows PowerShell
-# Copy-Item .env.example .env.local -ErrorAction SilentlyContinue
 ```
 
 Add the following to `frontend/.env.local`:
@@ -65,10 +63,16 @@ Add the following to `frontend/.env.local`:
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-6. Start the frontend dev server.
+5. Start the backend API.
+```bash
+uvicorn backend.main:app --reload --port 8000
+```
+
+6. In the New Teminal, Start the frontend dev server.
 ```bash
 npm run dev
 ```
+[Note: The program runs in frontend and backend in 2 seperate Terminals Simultaneosly]
 
 Frontend will be available at `http://localhost:5173`.
 
