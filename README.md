@@ -33,12 +33,12 @@ python -m venv .venv
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
 # macOS/Linux
-# source .venv/bin/activate
+source .venv/bin/activate
 ```
 
-2. Install backend dependencies.
+2. Install dependencies.
 ```bash
-pip install -r backend/requirements.txt
+pip install -r requirements.txt
 ```
 
 3. Start the backend API.
@@ -54,10 +54,10 @@ npm install
 
 5. Configure the frontend API base URL.
 ```bash
+# Windows PowerShell
+Copy-Item .env.example .env.local -ErrorAction SilentlyContinue
 # macOS/Linux
 cp .env.example .env.local 2>/dev/null || true
-# Windows PowerShell
-# Copy-Item .env.example .env.local -ErrorAction SilentlyContinue
 ```
 
 Add the following to `frontend/.env.local`:
