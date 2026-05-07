@@ -72,7 +72,7 @@ uvicorn backend.main:app --reload --port 8000
 ```bash
 npm run dev
 ```
-[Note: The program runs in frontend and backend in 2 seperate Terminals Simultaneosly]
+[Note: The program runs frontend and backend in 2 seperate Terminals Simultaneosly]
 
 Frontend will be available at `http://localhost:5173`.
 
