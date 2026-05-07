@@ -301,6 +301,10 @@ export default function Step1Upload({
       setSampleError("Select a sample dataset first.");
       return;
     }
+    if (!sampleDatasets.some((item) => item.name === selectedSample && item.configured)) {
+      setSampleError("Google Drive link is not configured yet for the selected sample dataset.");
+      return;
+    }
     setIsSampleLoading(true);
     try {
       const response = await fetch(sampleDatasetUrl(selectedSample));
@@ -418,7 +422,9 @@ export default function Step1Upload({
             ) : (
               sampleDatasets.map((item) => (
                 <option key={item.name} value={item.name}>
-                  {item.name} ({item.format.toUpperCase()}, {formatBytes(item.size_bytes)})
+                  {item.name}
+                  {item.size_bytes ? ` (${item.format.toUpperCase()}, ${formatBytes(item.size_bytes)})` : ` (${item.format.toUpperCase()})`}
+                  {!item.configured ? " [link pending]" : ""}
                 </option>
               ))
             )}
@@ -426,10 +432,18 @@ export default function Step1Upload({
           <button
             type="button"
             onClick={handleSampleData}
-            disabled={isSampleLoading || !!dataset || !selectedSample}
+            disabled={
+              isSampleLoading ||
+              !!dataset ||
+              !selectedSample ||
+              !sampleDatasets.some((item) => item.name === selectedSample && item.configured)
+            }
             className={[
               "px-4 py-2 rounded-md text-sm font-medium border transition w-full sm:w-auto",
-              isSampleLoading || !!dataset || !selectedSample
+              isSampleLoading ||
+              !!dataset ||
+              !selectedSample ||
+              !sampleDatasets.some((item) => item.name === selectedSample && item.configured)
                 ? "border-gray-300 bg-gray-100 text-gray-400 cursor-not-allowed"
                 : "border-brand-500 bg-brand-600 text-white hover:bg-brand-700",
             ].join(" ")}

@@ -114,8 +114,9 @@ export type SplitConfig = {
 
 export type SampleDatasetInfo = {
   name: string;
-  size_bytes: number;
+  size_bytes?: number | null;
   format: "csv" | "xes";
+  configured: boolean;
 };
 
 // -----------------------------

@@ -239,29 +239,73 @@ class PipelineUnitTests(unittest.TestCase):
 
     def test_list_sample_datasets(self):
         name = "list_sample_datasets"
-        original_dir = backend_main.SAMPLE_DATASETS_DIR
+        original_path = backend_main.SAMPLE_DATASETS_CONFIG_PATH
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
-                pd.DataFrame({"a": [1]}).to_csv(os.path.join(tmpdir, "sample.csv"), index=False)
-                with open(os.path.join(tmpdir, "sample.xes"), "w", encoding="utf-8") as handle:
-                    handle.write("<log></log>")
-                with open(os.path.join(tmpdir, "desktop.ini"), "w", encoding="utf-8") as handle:
-                    handle.write("[.ShellClassInfo]")
+                config_path = os.path.join(tmpdir, "sample_datasets.json")
+                with open(config_path, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        [
+                            {
+                                "name": "sample.csv",
+                                "format": "csv",
+                                "size_bytes": 123,
+                                "drive_url": "PASTE_GOOGLE_DRIVE_LINK_HERE",
+                            },
+                            {
+                                "name": "sample.xes",
+                                "format": "xes",
+                                "drive_url": "https://drive.google.com/file/d/abc123/view?usp=sharing",
+                            },
+                        ],
+                        handle,
+                    )
 
-                backend_main.SAMPLE_DATASETS_DIR = tmpdir
+                backend_main.SAMPLE_DATASETS_CONFIG_PATH = config_path
                 datasets = backend_main._list_sample_datasets()
 
                 self.assertEqual(len(datasets), 2)
                 self.assertEqual(datasets[0]["name"], "sample.csv")
                 self.assertEqual(datasets[0]["format"], "csv")
+                self.assertFalse(datasets[0]["configured"])
                 self.assertEqual(datasets[1]["name"], "sample.xes")
                 self.assertEqual(datasets[1]["format"], "xes")
+                self.assertTrue(datasets[1]["configured"])
             self._record(name, True)
         except Exception as exc:
             self._record(name, False, str(exc))
             raise
         finally:
-            backend_main.SAMPLE_DATASETS_DIR = original_dir
+            backend_main.SAMPLE_DATASETS_CONFIG_PATH = original_path
+
+    def test_extract_google_drive_file_id(self):
+        name = "extract_google_drive_file_id"
+        try:
+            self.assertEqual(
+                backend_main._extract_google_drive_file_id(
+                    "https://drive.google.com/file/d/abc123/view?usp=sharing"
+                ),
+                "abc123",
+            )
+            self.assertEqual(
+                backend_main._extract_google_drive_file_id(
+                    "https://drive.google.com/open?id=xyz789"
+                ),
+                "xyz789",
+            )
+            self.assertEqual(
+                backend_main._extract_google_drive_file_id(
+                    "https://drive.google.com/uc?export=download&id=id456"
+                ),
+                "id456",
+            )
+            self.assertIsNone(
+                backend_main._extract_google_drive_file_id("https://example.com/file")
+            )
+            self._record(name, True)
+        except Exception as exc:
+            self._record(name, False, str(exc))
+            raise
 
     def test_run_path_helpers(self):
         name = "run_path_helpers"

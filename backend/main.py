@@ -6,14 +6,16 @@ import json
 import shutil
 import subprocess
 import zipfile
+from urllib.parse import parse_qs, urlparse
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
+import requests
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from collections import deque
 import re
@@ -67,7 +69,7 @@ STORAGE_DIR = os.path.join(BACKEND_DIR, "storage")
 UPLOAD_DIR = os.path.join(STORAGE_DIR, "uploads")
 DATASETS_DIR = os.path.join(STORAGE_DIR, "datasets")
 RUNS_DIR = os.path.join(STORAGE_DIR, "runs")
-SAMPLE_DATASETS_DIR = os.path.join(REPO_ROOT, "ppmx_sample_dataset")
+SAMPLE_DATASETS_CONFIG_PATH = os.path.join(BACKEND_DIR, "sample_datasets.json")
 
 for d in (STORAGE_DIR, UPLOAD_DIR, DATASETS_DIR, RUNS_DIR):
     os.makedirs(d, exist_ok=True)
@@ -98,43 +100,108 @@ def _utc_now() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
-def _sample_dataset_path(name: str) -> str:
-    candidate = os.path.abspath(os.path.join(SAMPLE_DATASETS_DIR, name))
-    sample_root = os.path.abspath(SAMPLE_DATASETS_DIR)
-    if os.path.commonpath([sample_root, candidate]) != sample_root:
-        raise HTTPException(status_code=400, detail="Invalid sample dataset path.")
-    if not os.path.isfile(candidate):
-        raise HTTPException(status_code=404, detail="Sample dataset not found.")
-    return candidate
+def _load_sample_dataset_catalog() -> List[Dict[str, Any]]:
+    if not os.path.isfile(SAMPLE_DATASETS_CONFIG_PATH):
+        return []
+    data = _read_json(SAMPLE_DATASETS_CONFIG_PATH)
+    if not isinstance(data, list):
+        raise HTTPException(status_code=500, detail="Invalid sample dataset catalog format.")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _is_drive_url_configured(url: Optional[str]) -> bool:
+    if not url:
+        return False
+    stripped = url.strip()
+    if not stripped:
+        return False
+    if "PASTE_GOOGLE_DRIVE_LINK_HERE" in stripped:
+        return False
+    return True
+
+
+def _get_sample_dataset_entry(name: str) -> Dict[str, Any]:
+    for item in _load_sample_dataset_catalog():
+        if item.get("name") == name:
+            return item
+    raise HTTPException(status_code=404, detail="Sample dataset not found.")
 
 
 def _list_sample_datasets() -> List[Dict[str, Any]]:
-    if not os.path.isdir(SAMPLE_DATASETS_DIR):
-        return []
-
     datasets: List[Dict[str, Any]] = []
-    for entry in sorted(os.scandir(SAMPLE_DATASETS_DIR), key=lambda item: item.name.lower()):
-        if not entry.is_file():
+    for item in sorted(_load_sample_dataset_catalog(), key=lambda entry: str(entry.get("name", "")).lower()):
+        name = str(item.get("name", "")).strip()
+        fmt = str(item.get("format", "")).strip().lower()
+        if not name or fmt not in {"csv", "xes"}:
             continue
-        lower = entry.name.lower()
-        if lower == "desktop.ini":
-            continue
-        if lower.endswith(".xes.gz"):
-            fmt = "xes"
-        elif lower.endswith(".xes"):
-            fmt = "xes"
-        elif lower.endswith(".csv"):
-            fmt = "csv"
-        else:
-            continue
+        size_bytes = item.get("size_bytes")
         datasets.append(
             {
-                "name": entry.name,
-                "size_bytes": int(entry.stat().st_size),
+                "name": name,
+                "size_bytes": int(size_bytes) if isinstance(size_bytes, (int, float)) else None,
                 "format": fmt,
+                "configured": _is_drive_url_configured(item.get("drive_url")),
             }
         )
     return datasets
+
+
+def _extract_google_drive_file_id(link: str) -> Optional[str]:
+    parsed = urlparse(link)
+    if "drive.google.com" not in parsed.netloc.lower():
+        return None
+
+    qs = parse_qs(parsed.query)
+    if "id" in qs and qs["id"]:
+        return qs["id"][0]
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if "d" in parts:
+        idx = parts.index("d")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return None
+
+
+def _google_drive_download_response(drive_url: str) -> requests.Response:
+    file_id = _extract_google_drive_file_id(drive_url)
+    if not file_id:
+        raise HTTPException(status_code=500, detail="Invalid Google Drive link in sample dataset catalog.")
+
+    session = requests.Session()
+    base_url = "https://drive.google.com/uc"
+    params = {"export": "download", "id": file_id}
+    response = session.get(base_url, params=params, stream=True, timeout=120)
+
+    confirm_token = None
+    for key, value in response.cookies.items():
+        if key.startswith("download_warning"):
+            confirm_token = value
+            break
+
+    if confirm_token:
+        response.close()
+        response = session.get(
+            base_url,
+            params={"export": "download", "id": file_id, "confirm": confirm_token},
+            stream=True,
+            timeout=120,
+        )
+
+    if response.status_code >= 400:
+        response.close()
+        raise HTTPException(status_code=502, detail="Failed to download sample dataset from Google Drive.")
+
+    content_type = response.headers.get("content-type", "")
+    if "text/html" in content_type.lower():
+        body = response.text[:4000]
+        response.close()
+        raise HTTPException(
+            status_code=502,
+            detail="Google Drive returned an HTML confirmation page instead of the dataset file.",
+        )
+
+    return response
 
 
 def _detect_upload_format(filename: str) -> str:
@@ -300,8 +367,9 @@ class DatasetUploadResponse(BaseModel):
 
 class SampleDatasetInfo(BaseModel):
     name: str
-    size_bytes: int
+    size_bytes: Optional[int] = None
     format: str
+    configured: bool = False
 
 
 class DatasetMeta(BaseModel):
@@ -648,8 +716,24 @@ def list_sample_datasets():
 
 @app.get("/sample-datasets/{sample_name}")
 def download_sample_dataset(sample_name: str):
-    sample_path = _sample_dataset_path(sample_name)
-    return FileResponse(sample_path, filename=os.path.basename(sample_path))
+    item = _get_sample_dataset_entry(sample_name)
+    drive_url = item.get("drive_url")
+    if not _is_drive_url_configured(drive_url):
+        raise HTTPException(status_code=400, detail="Google Drive link not configured for this sample dataset.")
+
+    upstream = _google_drive_download_response(str(drive_url))
+    media_type = "text/csv" if str(item.get("format", "")).lower() == "csv" else "application/octet-stream"
+    headers = {"Content-Disposition": f'attachment; filename="{sample_name}"'}
+
+    def iter_stream():
+        try:
+            for chunk in upstream.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    return StreamingResponse(iter_stream(), media_type=media_type, headers=headers)
 
 
 @app.post("/datasets/{dataset_id}/preprocess", response_model=DatasetUploadResponse)
