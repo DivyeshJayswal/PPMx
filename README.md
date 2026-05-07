@@ -84,6 +84,20 @@ Frontend will be available at `http://localhost:5173`.
 https://explainability-bedf8.web.app/
 ```
 
+**Sample Datasets**
+These sample event logs are available from the Dataset Setup step in the UI and can be downloaded from here:
+
+- `BPI_2020_Log_DomesticDeclarations.xes`  
+  https://drive.google.com/file/d/1AzsG6xg9ftqQRSW2yyY7gaLcBK1qkSXv/view?usp=sharing
+- `BPI_2020_Log_InternationalDeclarations.xes`  
+  https://drive.google.com/file/d/1Oz-Mbmlt4n6aiJlHSNUP3oVk-zH5UK82/view?usp=sharing
+- `BPI_2020_Log_PrepaidTravelCost.xes`  
+  https://drive.google.com/file/d/1dSsgdl3RIetTTNcOOfzgzF3pxG5KLyAg/view?usp=sharing
+- `BPI_2020_Log_RequestForPayment.xes`  
+  https://drive.google.com/file/d/1V6hbOWKbN2MtnPtOjPAgPKhqDwvYJTym/view?usp=sharing
+- `Sepsis Cases - Event Log.xes`  
+  https://drive.google.com/file/d/1fzY9b5ly-SHUmYvOOMXbO510hdYRcQqq/view?usp=sharing
+
 **Usage Workflow**
 1. Preprocess the event log: upload raw CSV/XES or a preprocessed CSV. Optionally skip preprocessing by uploading pre-split datasets via the GUI. Map required columns (case ID, activity, timestamp; resource optional). For standardized BPI 2017/2020 logs, automatic column detection is supported in batch/CLI.
 2. Train and predict: choose Transformer or GNN and select a task. Classification supports next-activity and custom target prediction; regression supports event-time and remaining-time. Configure hyperparameters in the GUI or use defaults, then run training and generate test-set predictions.
