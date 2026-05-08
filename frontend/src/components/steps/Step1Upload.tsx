@@ -4,11 +4,11 @@ import UploadDropzone from "../ui/UploadDropZone";
 import Step2Mapping, { type ManualMapping } from "./Step2Mapping";
 import type { DatasetUploadResponse, SampleDatasetInfo, SplitConfig } from "../../lib/api";
 import {
+  downloadSampleDataset,
   generateSplits,
   listSampleDatasets,
   preprocessedDatasetUrl,
   preprocessDataset,
-  sampleDatasetUrl,
   splitDownloadUrl,
   uploadDataset,
   uploadSplitsNewDataset,
@@ -307,9 +307,7 @@ export default function Step1Upload({
     }
     setIsSampleLoading(true);
     try {
-      const response = await fetch(sampleDatasetUrl(selectedSample));
-      if (!response.ok) throw new Error("Could not fetch sample dataset from server.");
-      const blob = await response.blob();
+      const blob = await downloadSampleDataset(selectedSample);
       const type = selectedSample.toLowerCase().endsWith(".csv")
         ? "text/csv"
         : "application/octet-stream";
@@ -947,5 +945,4 @@ export default function Step1Upload({
     </div>
   );
 }
-
 
