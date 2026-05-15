@@ -12,6 +12,17 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
+export type ColumnDiagnostic = {
+  non_null_count: number;
+  unique_count: number;
+  unique_ratio: number;
+  mean_group_size: number;
+  max_frequency_share: number;
+  timestamp_parse_ratio: number;
+  looks_event_unique: boolean;
+  looks_timestamp_like: boolean;
+};
+
 // -----------------------------
 // Types (match backend responses)
 // -----------------------------
@@ -31,6 +42,7 @@ export type DatasetUploadResponse = {
   columns: string[];
   column_types: Record<string, "categorical" | "numerical">;
   detected_mapping: Record<string, string>;
+  column_diagnostics?: Record<string, ColumnDiagnostic>;
   preview: Array<Record<string, JsonValue>>;
 };
 
@@ -51,6 +63,7 @@ export type DatasetMeta = {
   columns: string[];
   column_types: Record<string, "categorical" | "numerical">;
   detected_mapping: Record<string, string>;
+  column_diagnostics?: Record<string, ColumnDiagnostic>;
   created_at: string;
 };
 
@@ -287,6 +300,10 @@ export async function getRunLogs(run_id: string, tail = 50): Promise<RunLogsRes>
     `${API_BASE}/runs/${encodeURIComponent(run_id)}/logs?tail=${tail}`
   );
   return (await res.json()) as RunLogsRes;
+}
+
+export function runLogsTextUrl(run_id: string): string {
+  return `${API_BASE}/runs/${encodeURIComponent(run_id)}/logs.txt`;
 }
 
 export async function pollRunUntilDone(

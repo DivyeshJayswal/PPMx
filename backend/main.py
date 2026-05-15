@@ -362,6 +362,7 @@ class DatasetUploadResponse(BaseModel):
     columns: List[str]
     column_types: Dict[str, str] = Field(default_factory=dict)
     detected_mapping: Dict[str, str]
+    column_diagnostics: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     preview: List[Dict[str, Any]]
 
 
@@ -389,6 +390,7 @@ class DatasetMeta(BaseModel):
     columns: List[str]
     column_types: Dict[str, str] = Field(default_factory=dict)
     detected_mapping: Dict[str, str]
+    column_diagnostics: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     created_at: str
 
 
@@ -483,6 +485,48 @@ def _infer_column_types(df: pd.DataFrame) -> Dict[str, str]:
         else:
             out[col] = "categorical"
     return out
+
+
+def _compute_column_diagnostics(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+    diagnostics: Dict[str, Dict[str, Any]] = {}
+    timestamp_name_hints = ("timestamp", "time", "date")
+
+    for col in df.columns:
+        series = df[col]
+        non_null = int(series.notna().sum())
+        unique_count = int(series.nunique(dropna=True)) if non_null > 0 else 0
+        unique_ratio = float(unique_count / non_null) if non_null > 0 else 0.0
+        mean_group_size = float(non_null / unique_count) if unique_count > 0 else 0.0
+
+        value_counts = series.value_counts(dropna=True)
+        max_frequency = int(value_counts.iloc[0]) if not value_counts.empty else 0
+        max_frequency_share = float(max_frequency / non_null) if non_null > 0 else 0.0
+
+        timestamp_parse_ratio = 0.0
+        if (
+            pd.api.types.is_datetime64_any_dtype(series)
+            or pd.api.types.is_object_dtype(series)
+            or pd.api.types.is_string_dtype(series)
+            or any(hint in str(col).lower() for hint in timestamp_name_hints)
+        ):
+            parsed = pd.to_datetime(series, errors="coerce")
+            timestamp_parse_ratio = float(parsed.notna().sum() / non_null) if non_null > 0 else 0.0
+
+        diagnostics[col] = {
+            "non_null_count": non_null,
+            "unique_count": unique_count,
+            "unique_ratio": unique_ratio,
+            "mean_group_size": mean_group_size,
+            "max_frequency_share": max_frequency_share,
+            "timestamp_parse_ratio": timestamp_parse_ratio,
+            "looks_event_unique": bool(non_null >= 20 and unique_ratio >= 0.98),
+            "looks_timestamp_like": bool(
+                timestamp_parse_ratio >= 0.8
+                or any(hint in str(col).lower() for hint in timestamp_name_hints)
+            ),
+        }
+
+    return diagnostics
 
 
 def _write_split_files(
@@ -662,6 +706,7 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
 
     preview_rows = df.head(20).to_dict(orient="records")
     column_types = _infer_column_types(df)
+    column_diagnostics = _compute_column_diagnostics(df)
 
     preprocessed_at = _utc_now() if preprocessed else None
 
@@ -682,6 +727,7 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
         columns=list(df.columns),
         column_types=column_types,
         detected_mapping=detected_mapping,
+        column_diagnostics=column_diagnostics,
         created_at=_utc_now(),
     )
     if preprocessed:
@@ -705,6 +751,7 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
         columns=list(df.columns),
         column_types=column_types,
         detected_mapping=detected_mapping,
+        column_diagnostics=column_diagnostics,
         preview=preview_rows,
     )
 
@@ -767,6 +814,7 @@ def preprocess_dataset(dataset_id: str, options: PreprocessOptions):
 
     preview_rows = df.head(20).to_dict(orient="records")
     column_types = _infer_column_types(df)
+    column_diagnostics = _compute_column_diagnostics(df)
     processed_at = _utc_now()
 
     updated_meta = DatasetMeta(
@@ -786,6 +834,7 @@ def preprocess_dataset(dataset_id: str, options: PreprocessOptions):
         columns=list(df.columns),
         column_types=column_types,
         detected_mapping=detected_mapping or meta.detected_mapping,
+        column_diagnostics=column_diagnostics,
         created_at=meta.created_at,
     )
     _write_json(_dataset_meta_path(dataset_id), updated_meta.model_dump())
@@ -806,6 +855,7 @@ def preprocess_dataset(dataset_id: str, options: PreprocessOptions):
         columns=list(df.columns),
         column_types=column_types,
         detected_mapping=detected_mapping or meta.detected_mapping,
+        column_diagnostics=column_diagnostics,
         preview=preview_rows,
     )
 
@@ -906,6 +956,7 @@ def generate_splits(dataset_id: str, cfg: SplitConfig):
     split_df = pd.read_csv(split_dataset_path)
     preview_rows = split_df.head(20).to_dict(orient="records")
     column_types = _infer_column_types(split_df)
+    column_diagnostics = _compute_column_diagnostics(split_df)
 
     updated_meta = DatasetMeta(
         dataset_id=dataset_id,
@@ -924,6 +975,7 @@ def generate_splits(dataset_id: str, cfg: SplitConfig):
         columns=list(split_df.columns),
         column_types=column_types,
         detected_mapping=meta.detected_mapping,
+        column_diagnostics=column_diagnostics,
         created_at=meta.created_at,
     )
     _write_json(_dataset_meta_path(dataset_id), updated_meta.model_dump())
@@ -944,6 +996,7 @@ def generate_splits(dataset_id: str, cfg: SplitConfig):
         columns=list(split_df.columns),
         column_types=column_types,
         detected_mapping=meta.detected_mapping,
+        column_diagnostics=column_diagnostics,
         preview=preview_rows,
     )
 
@@ -975,6 +1028,7 @@ async def upload_splits(dataset_id: str, train: UploadFile = File(...), val: Upl
 
     preview_rows = combined_df.head(20).to_dict(orient="records")
     column_types = _infer_column_types(combined_df)
+    column_diagnostics = _compute_column_diagnostics(combined_df)
 
     updated_meta = DatasetMeta(
         dataset_id=dataset_id,
@@ -993,6 +1047,7 @@ async def upload_splits(dataset_id: str, train: UploadFile = File(...), val: Upl
         columns=list(combined_df.columns),
         column_types=column_types,
         detected_mapping=meta.detected_mapping,
+        column_diagnostics=column_diagnostics,
         created_at=meta.created_at,
     )
     _write_json(_dataset_meta_path(dataset_id), updated_meta.model_dump())
@@ -1013,6 +1068,7 @@ async def upload_splits(dataset_id: str, train: UploadFile = File(...), val: Upl
         columns=list(combined_df.columns),
         column_types=column_types,
         detected_mapping=meta.detected_mapping,
+        column_diagnostics=column_diagnostics,
         preview=preview_rows,
     )
 
@@ -1046,6 +1102,7 @@ async def upload_splits_new_dataset(train: UploadFile = File(...), val: UploadFi
 
     preview_rows = combined_df.head(20).to_dict(orient="records")
     column_types = _infer_column_types(combined_df)
+    column_diagnostics = _compute_column_diagnostics(combined_df)
     created_at = _utc_now()
 
     meta = DatasetMeta(
@@ -1065,6 +1122,7 @@ async def upload_splits_new_dataset(train: UploadFile = File(...), val: UploadFi
         columns=list(combined_df.columns),
         column_types=column_types,
         detected_mapping={},
+        column_diagnostics=column_diagnostics,
         created_at=created_at,
     )
     _write_json(_dataset_meta_path(dataset_id), meta.model_dump())
@@ -1085,6 +1143,7 @@ async def upload_splits_new_dataset(train: UploadFile = File(...), val: UploadFi
         columns=list(combined_df.columns),
         column_types=column_types,
         detected_mapping={},
+        column_diagnostics=column_diagnostics,
         preview=preview_rows,
     )
 
@@ -1212,6 +1271,19 @@ def get_run_logs(run_id: str, tail: int = 50):
             lines.append(clean)
 
     return {"run_id": run_id, "lines": list(lines)}
+
+
+@app.get("/runs/{run_id}/logs.txt")
+def download_run_logs(run_id: str):
+    """
+    Download the raw run log file.
+    """
+    rdir = _run_dir(run_id)
+    log_path = os.path.join(rdir, "logs.txt")
+    if not os.path.exists(log_path):
+        raise HTTPException(status_code=404, detail="Run logs not found")
+
+    return FileResponse(log_path, filename=f"run_{run_id}_logs.txt", media_type="text/plain")
 
 
 @app.get("/runs/{run_id}/artifacts")

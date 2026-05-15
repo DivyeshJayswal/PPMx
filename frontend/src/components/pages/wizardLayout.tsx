@@ -64,29 +64,109 @@ function extractEpochProgress(lines: string[]): { current: number; total: number
   return null;
 }
 
+function extractGraphBuildProgress(lines: string[]): number | null {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const m = lines[i].match(/Building graphs:\s+(\d+)%/i);
+    if (m) {
+      const pct = Number(m[1]);
+      if (Number.isFinite(pct)) return Math.max(0, Math.min(100, pct));
+    }
+  }
+  return null;
+}
+
+function detectExplainabilityProgress(lines: string[]): number | null {
+  const joined = lines.join("\n").toLowerCase();
+
+  if (
+    joined.includes("combined benchmark summary saved") ||
+    joined.includes("benchmark summary saved") ||
+    joined.includes("benchmark results saved")
+  ) {
+    return 98;
+  }
+  if (joined.includes("[benchmark evaluation]") || joined.includes("running benchmark evaluation")) {
+    return 93;
+  }
+  if (
+    joined.includes("generating comprehensive analysis") ||
+    joined.includes("generating comparison report") ||
+    joined.includes("feature importance summary saved")
+  ) {
+    return 90;
+  }
+  if (
+    joined.includes("graphlime local analysis") ||
+    joined.includes("running lime") ||
+    joined.includes("generating lime explanations")
+  ) {
+    return 87;
+  }
+  if (
+    joined.includes("temporal gradient attribution") ||
+    joined.includes("temporal gradient plots saved") ||
+    joined.includes("shap_temporal_evolution")
+  ) {
+    return 83;
+  }
+  if (
+    joined.includes("gradient analysis") ||
+    joined.includes("running shap") ||
+    joined.includes("computing shap values") ||
+    joined.includes("gnn explainability") ||
+    joined.includes("explainability module:")
+  ) {
+    return 76;
+  }
+  if (joined.includes("explainability")) {
+    return 74;
+  }
+
+  return null;
+}
+
 function estimateProgressFromLogs(lines: string[], status: RunStatus | null): number {
   if (!status) return 0;
-  if (status.status === "queued") return 10;
+  if (status.status === "queued") return 8;
   if (status.status === "failed") return 100;
   if (status.status === "succeeded") return 100;
 
+  const graphBuild = extractGraphBuildProgress(lines);
   const epoch = extractEpochProgress(lines);
-  let progress = 25;
+  let progress = 15;
+
+  if (graphBuild !== null) {
+    progress = Math.max(progress, Math.round(8 + graphBuild * 0.12));
+  }
 
   if (epoch) {
     const frac = Math.min(1, epoch.current / epoch.total);
-    progress = 30 + frac * 50; // 30-80
+    progress = Math.max(progress, 25 + frac * 35); // 25-60
   }
 
   const joined = lines.join("\n").toLowerCase();
+  if (joined.includes("[ok] built")) {
+    progress = Math.max(progress, 22);
+  }
+  if (joined.includes("training gnn") || joined.includes("building model") || joined.includes("training transformer")) {
+    progress = Math.max(progress, 24);
+  }
+  if (joined.includes("training completed")) {
+    progress = Math.max(progress, 62);
+  }
   if (joined.includes("evaluating on test") || joined.includes("evaluating")) {
-    progress = Math.max(progress, 85);
+    progress = Math.max(progress, 66);
   }
-  if (joined.includes("saving results") || joined.includes("results saved")) {
-    progress = Math.max(progress, 92);
+  if (
+    joined.includes("model saved to:") ||
+    joined.includes("training history plot saved") ||
+    joined.includes("results saved to:")
+  ) {
+    progress = Math.max(progress, 71);
   }
-  if (joined.includes("explainability")) {
-    progress = Math.max(progress, 95);
+  const explainabilityProgress = detectExplainabilityProgress(lines);
+  if (explainabilityProgress !== null) {
+    progress = Math.max(progress, explainabilityProgress);
   }
 
   return Math.min(99, Math.round(progress));
@@ -502,7 +582,7 @@ export default function WizardLayout() {
         setRunStatus(st);
         let cleanedLogs: string[] = [];
         try {
-          const logs = await getRunLogs(runId, 120);
+          const logs = await getRunLogs(runId, 400);
           const rawLines = logs.lines ?? [];
           cleanedLogs = rawLines
             .map(cleanLogLine)

@@ -1,5 +1,5 @@
 import Card from "../ui/card";
-import type { DatasetUploadResponse } from "../../lib/api";
+import type { ColumnDiagnostic, DatasetUploadResponse } from "../../lib/api";
 
 export type MappingMode = "manual";
 
@@ -22,6 +22,74 @@ function uniqueNonEmpty(values: Array<string | null>): boolean {
   return new Set(filtered).size === filtered.length;
 }
 
+function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function getDiagnostic(
+  dataset: DatasetUploadResponse | null,
+  column: string
+): ColumnDiagnostic | null {
+  if (!dataset || !column.trim()) return null;
+  return dataset.column_diagnostics?.[column] ?? null;
+}
+
+function buildMappingWarnings(
+  dataset: DatasetUploadResponse | null,
+  manualMapping: ManualMapping
+): string[] {
+  if (!dataset) return [];
+
+  const warnings: string[] = [];
+  const detectedCase = dataset.detected_mapping?.case_id;
+  const detectedTimestamp = dataset.detected_mapping?.timestamp;
+
+  const caseDiag = getDiagnostic(dataset, manualMapping.case_id);
+  if (manualMapping.case_id && caseDiag) {
+    if (caseDiag.looks_event_unique) {
+      let message =
+        `"${manualMapping.case_id}" looks event-unique: ` +
+        `${caseDiag.unique_count.toLocaleString()} distinct values across ` +
+        `${dataset.num_events.toLocaleString()} rows. Using it as Case ID may make every event its own case.`;
+      if (detectedCase && detectedCase !== manualMapping.case_id) {
+        message += ` Suggested case column: "${detectedCase}".`;
+      }
+      warnings.push(message);
+    }
+    if (
+      caseDiag.timestamp_parse_ratio >= 0.8 &&
+      caseDiag.looks_timestamp_like &&
+      manualMapping.case_id !== manualMapping.timestamp
+    ) {
+      warnings.push(
+        `"${manualMapping.case_id}" also looks timestamp-like (${formatPercent(
+          caseDiag.timestamp_parse_ratio
+        )} parseable as dates). It may not be a real case identifier.`
+      );
+    }
+  }
+
+  const timestampDiag = getDiagnostic(dataset, manualMapping.timestamp);
+  if (manualMapping.timestamp && timestampDiag) {
+    if (timestampDiag.timestamp_parse_ratio < 0.8) {
+      let message =
+        `"${manualMapping.timestamp}" does not look like a reliable timestamp column ` +
+        `(${formatPercent(timestampDiag.timestamp_parse_ratio)} parseable as dates).`;
+      if (detectedTimestamp && detectedTimestamp !== manualMapping.timestamp) {
+        message += ` Suggested timestamp column: "${detectedTimestamp}".`;
+      }
+      warnings.push(message);
+    }
+    if (timestampDiag.max_frequency_share >= 0.95) {
+      warnings.push(
+        `"${manualMapping.timestamp}" is almost constant across the dataset. That is unusual for an event timestamp column.`
+      );
+    }
+  }
+
+  return warnings;
+}
+
 export default function Step2Mapping({
   dataset,
   manualMapping,
@@ -41,6 +109,8 @@ export default function Step2Mapping({
       manualMapping.timestamp,
       manualMapping.resource,
     ]);
+
+  const mappingWarnings = buildMappingWarnings(dataset, manualMapping);
 
   const mappingCard = !dataset ? (
     <Card>
@@ -84,6 +154,17 @@ export default function Step2Mapping({
               <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
                 Select Case ID, Activity, and Timestamp columns (must be different). Resource is
                 optional.
+              </div>
+            )}
+
+            {mappingWarnings.length > 0 && (
+              <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+                <div className="font-medium">Mapping warnings</div>
+                <ul className="list-disc ml-5 space-y-1">
+                  {mappingWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
               </div>
             )}
           </div>

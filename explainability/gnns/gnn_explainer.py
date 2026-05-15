@@ -335,10 +335,10 @@ class GradientExplainer:
         positive = np.maximum(centered_contrib, 0)
         negative = np.minimum(centered_contrib, 0)
         
-        ax.bar(time_steps, positive, color='#2ecc71', alpha=0.85,
-               label='Increases Prediction', width=0.75, edgecolor='#27ae60', linewidth=0.8)
-        ax.bar(time_steps, negative, color='#e74c3c', alpha=0.85,
-               label='Decreases Prediction', width=0.75, edgecolor='#c0392b', linewidth=0.8)
+        ax.bar(time_steps, positive, color='#2ca02c', alpha=1.0,
+               label='Increases Prediction', width=0.75, edgecolor='black', linewidth=0.8)
+        ax.bar(time_steps, negative, color='#d62728', alpha=1.0,
+               label='Decreases Prediction', width=0.75, edgecolor='black', linewidth=0.8)
         ax.axhline(y=0, color='black', linestyle='-', linewidth=2)
         
         if task in ['event_time', 'remaining_time']:
@@ -400,7 +400,7 @@ class GradientExplainer:
         plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
         
-        print(f"  [✓] Gradient plot saved: gradient_timestep_heatmap_sample_{sample_id}.png")
+        print(f"  [OK] Gradient plot saved: gradient_timestep_heatmap_sample_{sample_id}.png")
         
         if step_info:
             df_info = pd.DataFrame(step_info)
@@ -422,10 +422,10 @@ class GradientExplainer:
                     f.write(f"# Activity shown for context only\n")
                     df_info.to_csv(f, index=False)
                 
-                print(f"  [✓] Details CSV saved")
+                print(f"  [OK] Details CSV saved")
             else:
                 df_info.to_csv(os.path.join(output_dir, f'gradient_timestep_sample_{sample_id}_details.csv'), index=False)
-                print(f"  [✓] Details CSV saved")
+                print(f"  [OK] Details CSV saved")
 
     def plot_with_readable_table(self, results, output_dir, task):
         os.makedirs(output_dir, exist_ok=True)
@@ -536,10 +536,10 @@ class GradientExplainer:
                    dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
         
-        print(f"[✓] SHAP-style plot saved")
+        print(f"[OK] SHAP-style plot saved")
         
         summary_df.to_csv(os.path.join(output_dir, f'feature_summary_{task}.csv'), index=False)
-        print(f"[✓] CSV saved")
+        print(f"[OK] CSV saved")
 
     def explain_global_activity(self, graphs, num_samples=50):
         self.model.eval()
@@ -627,7 +627,7 @@ class GradientExplainer:
                    dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
         
-        print(f"[✓] Activity bar chart saved")
+        print(f"[OK] Activity bar chart saved")
 
 
 class TemporalGradientExplainer:
@@ -808,10 +808,10 @@ class TemporalGradientExplainer:
         positive = np.maximum(centered_contrib, 0)
         negative = np.minimum(centered_contrib, 0)
 
-        ax.bar(time_steps, positive, color='#2ecc71', alpha=0.85,
-               label='Increases Prediction', width=0.75, edgecolor='#27ae60', linewidth=0.8)
-        ax.bar(time_steps, negative, color='#e74c3c', alpha=0.85,
-               label='Decreases Prediction', width=0.75, edgecolor='#c0392b', linewidth=0.8)
+        ax.bar(time_steps, positive, color='#2ca02c', alpha=1.0,
+               label='Increases Prediction', width=0.75, edgecolor='black', linewidth=0.8)
+        ax.bar(time_steps, negative, color='#d62728', alpha=1.0,
+               label='Decreases Prediction', width=0.75, edgecolor='black', linewidth=0.8)
         ax.axhline(y=0, color='black', linestyle='-', linewidth=2)
 
         if task in ['event_time', 'remaining_time']:
@@ -1025,9 +1025,23 @@ class GraphLIMEExplainer:
         x_feat = np.stack(features, axis=1)
         y_target = l_bar.reshape(-1)
 
-        model = Lasso(alpha=self.hsic_lambda, fit_intercept=False, positive=True, max_iter=5000)
+        model = Lasso(alpha=self.hsic_lambda, fit_intercept=False, positive=False, max_iter=5000)
         model.fit(x_feat, y_target)
         return model.coef_
+
+    def _binary_mask_effects(self, x_mat, y_vec):
+        weights = []
+        y = np.asarray(y_vec, dtype=float)
+        for k in range(x_mat.shape[1]):
+            on_mask = x_mat[:, k] > 0.5
+            off_mask = ~on_mask
+            if on_mask.sum() == 0 or off_mask.sum() == 0:
+                weights.append(0.0)
+                continue
+            on_mean = float(np.mean(y[on_mask]))
+            off_mean = float(np.mean(y[off_mask]))
+            weights.append(on_mean - off_mean)
+        return np.asarray(weights, dtype=float)
 
     def explain_local(self, graph, task='activity', num_perturbations=200):
         self.model.eval()
@@ -1135,6 +1149,8 @@ class GraphLIMEExplainer:
                     corr = np.corrcoef(X_perturb[:, k], y_perturb)[0, 1]
                     weights.append(float(np.nan_to_num(corr, nan=0.0)))
             coefs = np.array(weights)
+        if coefs is None or np.allclose(coefs, 0):
+            coefs = self._binary_mask_effects(X_perturb, y_perturb)
 
         explanation = []
         for coef, (node_type, feat_idx) in zip(coefs, active_features):
@@ -1168,9 +1184,10 @@ class GraphLIMEExplainer:
         df = df.sort_values("AbsWeight", ascending=True)
 
         fig, ax = plt.subplots(figsize=(10, max(6, len(df) * 0.45)))
-        colors = ['#2ecc71' if x > 0 else '#e74c3c' for x in df["Weight"]]
+        # Match the original LIME palette used by the transformer explainability views.
+        colors = ['#2ca02c' if x > 0 else '#d62728' for x in df["Weight"]]
         y_pos = np.arange(len(df))
-        ax.barh(y_pos, df["Weight"].values, color=colors, alpha=0.85, edgecolor='black', linewidth=0.8)
+        ax.barh(y_pos, df["Weight"].values, color=colors, alpha=1.0, edgecolor='black', linewidth=0.8)
 
         ax.set_yticks(y_pos)
         ax.set_yticklabels(df["Feature"].tolist(), fontsize=9)
@@ -1241,7 +1258,10 @@ class ExplainabilityBenchmark:
 
     def _select_output(self, out):
         if self.task == 'activity':
-            return out[0]
+            logits = out[0]
+            if logits.ndim == 1:
+                logits = logits.unsqueeze(0)
+            return torch.softmax(logits, dim=-1)
         if self.task == 'event_time':
             return out[1]
         return out[2]
@@ -1251,6 +1271,33 @@ class ExplainabilityBenchmark:
         if self.task == 'activity':
             return pred.max()
         return pred.mean()
+
+    def _target_index(self, prediction):
+        if self.task != 'activity':
+            return None
+        flat = prediction.view(-1)
+        return int(torch.argmax(flat).item())
+
+    def _target_score(self, prediction, target_idx=None):
+        if self.task == 'activity':
+            flat = prediction.view(-1)
+            if target_idx is None:
+                target_idx = int(torch.argmax(flat).item())
+            return flat[target_idx]
+        return prediction.mean()
+
+    def _prediction_change(self, original_pred, updated_pred, target_idx=None):
+        if self.task == 'activity':
+            return (self._target_score(original_pred, target_idx) - self._target_score(updated_pred, target_idx)).item()
+        return (original_pred - updated_pred).abs().mean().item()
+
+    def _attribution_similarity(self, baseline_attr, perturbed_attr):
+        baseline = np.asarray(baseline_attr, dtype=float)
+        perturbed = np.asarray(perturbed_attr, dtype=float)
+        denom = np.linalg.norm(baseline) * np.linalg.norm(perturbed)
+        if denom == 0:
+            return 1.0 if np.linalg.norm(baseline - perturbed) == 0 else 0.0
+        return float(np.dot(baseline, perturbed) / denom)
 
     def _feature_dims(self, graph):
         act_features = graph['activity'].x.shape[1] if 'activity' in graph.x_dict else 0
@@ -1292,7 +1339,7 @@ class ExplainabilityBenchmark:
         for graph in graphs:
             g = graph.to(self.device)
             for key in g.x_dict:
-                g.x_dict[key].requires_grad = True
+                g.x_dict[key] = g.x_dict[key].detach().clone().requires_grad_(True)
 
             out = self.model(g)
             if self.task == 'activity':
@@ -1383,6 +1430,7 @@ class ExplainabilityBenchmark:
             for i in range(n_samples):
                 orig_out = self._predict(graphs[i])
                 orig_pred = self._select_output(orig_out)
+                target_idx = self._target_index(orig_pred)
 
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
                 top_k_idx = np.argsort(sample_attr)[-k:]
@@ -1393,10 +1441,7 @@ class ExplainabilityBenchmark:
                 masked_out = self._predict(masked_graph)
                 masked_pred = self._select_output(masked_out)
 
-                if self.task == 'activity':
-                    pred_change = (orig_pred - masked_pred).abs().max().item()
-                else:
-                    pred_change = (orig_pred - masked_pred).abs().mean().item()
+                pred_change = self._prediction_change(orig_pred, masked_pred, target_idx)
 
                 pred_changes.append(pred_change)
                 importance_sums.append(sample_attr[top_k_idx].sum())
@@ -1435,6 +1480,7 @@ class ExplainabilityBenchmark:
             for i in range(n_samples):
                 orig_out = self._predict(graphs[i])
                 orig_pred = self._select_output(orig_out)
+                target_idx = self._target_index(orig_pred)
 
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
                 top_k_idx = np.argsort(sample_attr)[-k:]
@@ -1445,10 +1491,7 @@ class ExplainabilityBenchmark:
                 masked_out = self._predict(masked_graph)
                 masked_pred = self._select_output(masked_out)
 
-                if self.task == 'activity':
-                    comp = (orig_pred.max() - masked_pred.max()).item()
-                else:
-                    comp = (orig_pred - masked_pred).abs().mean().item()
+                comp = self._prediction_change(orig_pred, masked_pred, target_idx)
                 comp_scores.append(comp)
 
             results[f'comprehensiveness_k{k}'] = {
@@ -1474,6 +1517,7 @@ class ExplainabilityBenchmark:
             for i in range(n_samples):
                 orig_out = self._predict(graphs[i])
                 orig_pred = self._select_output(orig_out)
+                target_idx = self._target_index(orig_pred)
 
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
                 top_k_idx = np.argsort(sample_attr)[-k:]
@@ -1484,10 +1528,7 @@ class ExplainabilityBenchmark:
                 masked_out = self._predict(masked_graph)
                 masked_pred = self._select_output(masked_out)
 
-                if self.task == 'activity':
-                    suff = (orig_pred.max() - masked_pred.max()).item()
-                else:
-                    suff = (orig_pred - masked_pred).abs().mean().item()
+                suff = self._prediction_change(orig_pred, masked_pred, target_idx)
                 suff_scores.append(suff)
 
             results[f'sufficiency_k{k}'] = {
@@ -1498,21 +1539,56 @@ class ExplainabilityBenchmark:
 
         return results
 
-    def stability(self, attributions, n_perturbations=10):
+    def _perturb_graph(self, graph, mask_prob=0.05):
+        perturbed = graph.clone().to(self.device)
+        for key in perturbed.x_dict:
+            x = perturbed[key].x.clone()
+            if x.numel() == 0:
+                continue
+            active_mask = x != 0
+            drop_mask = (torch.rand_like(x, dtype=torch.float32) < mask_prob) & active_mask
+            x = x.masked_fill(drop_mask, 0.0)
+            perturbed[key].x = x
+        return perturbed
+
+    def stability(self, graphs, attributions, n_perturbations=10):
         print("Computing Stability...")
-        n_samples = min(len(attributions), 20)
-        stability_scores = []
+        n_samples = min(len(graphs), len(attributions), 20)
+        variance_scores = []
+        cosine_scores = []
+
         for i in range(n_samples):
-            original_attr = attributions[i]
-            perturbed_attrs = [original_attr for _ in range(n_perturbations)]
-            attr_variance = np.var(perturbed_attrs, axis=0).mean()
-            stability_scores.append(attr_variance)
+            original_attr = np.asarray(attributions[i], dtype=float)
+            perturbed_attrs = []
+
+            for _ in range(n_perturbations):
+                perturbed_graph = self._perturb_graph(graphs[i])
+                perturbed_attr_batch, _ = self.compute_gradient_attributions([perturbed_graph])
+                if perturbed_attr_batch.size == 0:
+                    continue
+                perturbed_attr = np.asarray(perturbed_attr_batch[0], dtype=float)
+                min_len = min(len(original_attr), len(perturbed_attr))
+                if min_len == 0:
+                    continue
+                baseline = original_attr[:min_len]
+                candidate = perturbed_attr[:min_len]
+                perturbed_attrs.append(candidate)
+                cosine_scores.append(self._attribution_similarity(baseline, candidate))
+
+            if perturbed_attrs:
+                stacked = np.stack(perturbed_attrs, axis=0)
+                variance_scores.append(float(np.var(stacked, axis=0).mean()))
+
+        mean_variance = float(np.mean(variance_scores)) if variance_scores else 0.0
+        max_variance = float(np.max(variance_scores)) if variance_scores else 0.0
+        mean_cosine = float(np.mean(cosine_scores)) if cosine_scores else 0.0
 
         return {
             'stability': {
-                'mean_variance': float(np.mean(stability_scores)) if stability_scores else 0.0,
-                'max_variance': float(np.max(stability_scores)) if stability_scores else 0.0,
-                'stability_score': float(1.0 / (1.0 + np.mean(stability_scores))) if stability_scores else 0.0
+                'mean_variance': mean_variance,
+                'max_variance': max_variance,
+                'mean_cosine_similarity': mean_cosine,
+                'stability_score': mean_cosine
             }
         }
 
@@ -1532,6 +1608,8 @@ class ExplainabilityBenchmark:
             for i in range(n_samples):
                 grad_attr = np.abs(grad_attributions[i])
                 lime_attr = np.abs(lime_attributions[i])
+                if not np.all(np.isfinite(grad_attr)) or not np.all(np.isfinite(lime_attr)):
+                    continue
 
                 min_len = min(len(grad_attr), len(lime_attr))
                 grad_attr = grad_attr[:min_len]
@@ -1572,7 +1650,9 @@ class ExplainabilityBenchmark:
 
         for i in range(n_samples):
             orig_out = self._predict(graphs[i])
-            predictions = [self._prediction_value(orig_out).item()]
+            orig_pred = self._select_output(orig_out)
+            target_idx = self._target_index(orig_pred)
+            predictions = [self._target_score(orig_pred, target_idx).item()]
 
             sample_attr = np.abs(attributions[i])
             sorted_indices = np.argsort(sample_attr)[::-1]
@@ -1583,7 +1663,7 @@ class ExplainabilityBenchmark:
                 removed.append(int(idx))
                 act_mask, res_mask = self._masks_from_indices(removed, act_features, res_features, keep=False)
                 masked_graph = self._mask_graph(graphs[i], act_mask, res_mask)
-                pred = self._prediction_value(self._predict(masked_graph)).item()
+                pred = self._target_score(self._select_output(self._predict(masked_graph)), target_idx).item()
                 predictions.append(pred)
 
             n_monotonic = sum(1 for j in range(1, len(predictions)) if predictions[j] <= predictions[j-1])
@@ -1629,13 +1709,16 @@ class ExplainabilityBenchmark:
         else:
             recency_corr, recency_p = 0.0, 1.0
 
+        valid_positions = positions[valid_mask]
+        valid_importance = avg_importance[valid_mask]
+
         return {
             'temporal_consistency': {
                 'recency_correlation': float(recency_corr) if not np.isnan(recency_corr) else 0.0,
                 'recency_p_value': float(recency_p) if not np.isnan(recency_p) else 1.0,
                 'position_importance': avg_importance.tolist(),
-                'most_important_position': int(np.argmax(avg_importance)) if valid_mask.any() else 0,
-                'least_important_position': int(np.argmin(avg_importance[valid_mask])) if valid_mask.any() else 0
+                'most_important_position': int(valid_positions[np.argmax(valid_importance)]) if valid_positions.size else 0,
+                'least_important_position': int(valid_positions[np.argmin(valid_importance)]) if valid_positions.size else 0
             }
         }
 
@@ -1681,7 +1764,7 @@ class ExplainabilityBenchmark:
             results['monotonicity'] = {'error': str(e)}
 
         try:
-            results['stability'] = self.stability(grad_values)
+            results['stability'] = self.stability(graphs, grad_values)
         except Exception as e:
             print(f"[WARNING] Stability computation failed: {e}")
             results['stability'] = {'error': str(e)}
@@ -1933,13 +2016,13 @@ def run_gnn_explainability(model, data, output_dir, device, vocabularies=None, n
     if isinstance(tasks, str):
         tasks = [tasks]
     
-    print(f"\n[→] Tasks: {tasks}")
-    print(f"[→] Samples: {num_samples}")
+    print(f"\n[INFO] Tasks: {tasks}")
+    print(f"[INFO] Samples: {num_samples}")
     
     if methods in ['gradient', 'all']:
-        print("\n" + "─"*70)
+        print("\n" + "-"*70)
         print("GRADIENT ANALYSIS (SHAP-STYLE)")
-        print("─"*70)
+        print("-"*70)
         
         explainer = GradientExplainer(model, device, vocabularies)
         grad_dir = os.path.join(output_dir, 'gradient')
@@ -2001,9 +2084,9 @@ def run_gnn_explainability(model, data, output_dir, device, vocabularies=None, n
             print("[WARNING] No temporal plots generated.")
 
     if methods in ['lime', 'all']:
-        print("\n" + "─"*70)
+        print("\n" + "-"*70)
         print("GRAPHLIME LOCAL ANALYSIS")
-        print("─"*70)
+        print("-"*70)
         
         lime_explainer = GraphLIMEExplainer(model, device, vocabularies)
         lime_dir = os.path.join(output_dir, 'graphlime')
@@ -2068,7 +2151,7 @@ def run_gnn_explainability(model, data, output_dir, device, vocabularies=None, n
                         act_features, res_features = benchmark._feature_dims(bench_graphs[0])
                         lime_vectors = []
                         for g in bench_graphs:
-                            exp_list, _ = lime_explainer.explain_local(g, task)
+                            exp_list, _, _, _, _ = lime_explainer.explain_local(g, task)
                             lime_vectors.append(
                                 benchmark.vectorize_graphlime(exp_list, act_features, res_features)
                             )

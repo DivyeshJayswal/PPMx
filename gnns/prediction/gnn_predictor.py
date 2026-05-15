@@ -98,10 +98,23 @@ class GNNPredictor:
         
         print(f"Detected trace attributes: {trace_cols}")
         
-        def build_prefix_df(input_df):
+        def build_prefix_df(input_df, scope_name="dataset"):
             rows = []
             total_cases = input_df["CaseID"].nunique()
             processed_cases = 0
+            prefix_columns = [
+                "CaseID",
+                "prefix_id",
+                "prefix_pos",
+                "prefix_length",
+                "Activity",
+                "Resource",
+                "Timestamp",
+                "next_activity",
+                "next_timestamp",
+                "remaining_time_target",
+                *trace_cols,
+            ]
             for case_id, group in input_df.groupby("CaseID"):
                 processed_cases += 1
                 group = group.sort_values("Timestamp").reset_index(drop=True)
@@ -117,6 +130,12 @@ class GNNPredictor:
 
                 for k in range(1, trace_len):
                     label_next_activity = activities[k]
+                    next_timestamp = timestamps[k]
+                    prefix_current_timestamp = timestamps[k - 1]
+                    remaining_time_target = max(
+                        0.0,
+                        (timestamps[-1] - prefix_current_timestamp).total_seconds(),
+                    )
                     for pos in range(k):
                         row = {
                             "CaseID": case_id,
@@ -127,6 +146,8 @@ class GNNPredictor:
                             "Resource": resources[pos] if resources is not None else "Unknown",
                             "Timestamp": timestamps[pos],
                             "next_activity": label_next_activity,
+                            "next_timestamp": next_timestamp,
+                            "remaining_time_target": remaining_time_target,
                         }
                         if trace_attrs:
                             row.update(trace_attrs)
@@ -139,15 +160,26 @@ class GNNPredictor:
                         f"{len(rows):,} prefix rows"
                     )
 
-            prefix_df = pd.DataFrame(rows)
+            prefix_df = pd.DataFrame(rows, columns=prefix_columns)
             print(f"Generated {len(prefix_df):,} prefix rows")
+            if prefix_df.empty:
+                case_lengths = input_df.groupby("CaseID").size()
+                single_event_cases = int((case_lengths <= 1).sum()) if not case_lengths.empty else 0
+                total_cases = int(case_lengths.shape[0])
+                raise ValueError(
+                    "No prefixes could be generated for the "
+                    f"{scope_name}. GNN next-event prediction requires at least one case "
+                    "with two or more events after preprocessing and mapping. "
+                    f"Cases in {scope_name}: {total_cases}; "
+                    f"cases with <=1 event: {single_event_cases}."
+                )
             prefix_df["__ts_log"] = np.log1p(
                 prefix_df["Timestamp"].astype("int64") // 1_000_000_000
             ).astype("float32")
             return prefix_df
 
         base_df = df.drop(columns=[split_col]) if split_col else df
-        prefix_df = build_prefix_df(base_df)
+        prefix_df = build_prefix_df(base_df, scope_name="full dataset")
         
         vocabs = {}
         all_activities = set(prefix_df["Activity"].unique().tolist()) | set(prefix_df["next_activity"].unique().tolist())
@@ -156,7 +188,19 @@ class GNNPredictor:
         res_vals = sorted(prefix_df["Resource"].unique().tolist())
         vocabs["Resource"] = {v: i for i, v in enumerate(res_vals)}
         
-        IGNORE_COLS = {"CaseID", "prefix_id", "prefix_pos", "prefix_length", "Activity", "Resource", "Timestamp", "next_activity", "__ts_log"}
+        IGNORE_COLS = {
+            "CaseID",
+            "prefix_id",
+            "prefix_pos",
+            "prefix_length",
+            "Activity",
+            "Resource",
+            "Timestamp",
+            "next_activity",
+            "next_timestamp",
+            "remaining_time_target",
+            "__ts_log",
+        }
         trace_attributes = [col for col in prefix_df.columns if col not in IGNORE_COLS]
         
         for col in trace_attributes:
@@ -240,15 +284,10 @@ class GNNPredictor:
                 next_act = act_map[next_act_name]
                 data.y_activity = torch.tensor([next_act], dtype=torch.long)
                 
-                if k > 1:
-                    t_next = p.iloc[1]["Timestamp"].timestamp()
-                else:
-                    t_next = p.iloc[0]["Timestamp"].timestamp()
+                t_next = p.iloc[0]["next_timestamp"].timestamp()
                 data.y_timestamp = torch.tensor([np.log1p(t_next)], dtype=torch.float32)
                 
-                t_end = p.iloc[-1]["Timestamp"].timestamp()
-                t_now = p.iloc[0]["Timestamp"].timestamp()
-                remaining = max(0, t_end - t_now)
+                remaining = float(p.iloc[0]["remaining_time_target"])
                 data.y_remaining_time = torch.tensor([np.log1p(remaining)], dtype=torch.float32)
                 
                 graphs.append(data)
@@ -264,14 +303,19 @@ class GNNPredictor:
             val_df = df[df[split_col] == "val"].drop(columns=[split_col])
             test_df = df[df[split_col] == "test"].drop(columns=[split_col])
 
-            train_graphs = build_graphs(build_prefix_df(train_df))
-            val_graphs = build_graphs(build_prefix_df(val_df))
-            test_graphs = build_graphs(build_prefix_df(test_df))
+            train_graphs = build_graphs(build_prefix_df(train_df, scope_name="train split"))
+            val_graphs = build_graphs(build_prefix_df(val_df, scope_name="validation split"))
+            test_graphs = build_graphs(build_prefix_df(test_df, scope_name="test split"))
             graphs = train_graphs + val_graphs + test_graphs
         else:
             graphs = build_graphs(prefix_df)
 
         print(f"[OK] Built {len(graphs):,} graphs")
+        if not graphs:
+            raise ValueError(
+                "No GNN graphs were built from the generated prefixes. "
+                "Check whether the dataset contains valid multi-event cases and a valid activity mapping."
+            )
         
         if not split_col:
             n_total = len(graphs)

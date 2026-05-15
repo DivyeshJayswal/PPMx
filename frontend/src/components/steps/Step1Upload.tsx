@@ -315,21 +315,10 @@ export default function Step1Upload({
         : "application/octet-stream";
       const file = new File([blob], selectedSample, { type });
 
-      const uploaded = await uploadDataset(file, { preprocessed: false });
-      const preprocessed = await preprocessDataset(uploaded.dataset_id, {
-        sort_and_normalize_timestamps: true,
-        check_millisecond_order: true,
-        impute_categorical: true,
-        impute_numeric_neighbors: true,
-        drop_missing_timestamps: true,
-        fill_remaining_missing: true,
-        remove_duplicates: true,
-      });
-      const withSplits = await generateSplits(preprocessed.dataset_id, splitConfig);
-
       onModeChange("raw");
-      onUploaded(file, withSplits);
-      onSampleDataLoaded?.(file, withSplits);
+      const uploaded = await uploadDataset(file, { preprocessed: false });
+      onUploaded(file, uploaded);
+      onSampleDataLoaded?.(file, uploaded);
     } catch (e) {
       setSampleError(e instanceof Error ? e.message : "Failed to load sample data.");
     } finally {
@@ -389,10 +378,19 @@ export default function Step1Upload({
     }
   };
 
-  const showSplitControls =
-    !!dataset &&
-    (mode === "preprocessed" || (mode === "raw" && dataset.is_preprocessed));
   const mappingComplete = validateManualMapping(manualMapping);
+  const preprocessingRequired = mode === "raw";
+  const splitsReady = !!dataset?.split_paths;
+  const preprocessingLockedReason = !mappingComplete
+    ? "Complete the column mapping first."
+    : null;
+  const splitLockedReason = !mappingComplete
+    ? "Complete the column mapping first."
+    : preprocessingRequired && !dataset?.is_preprocessed
+    ? "Run preprocessing first."
+    : null;
+
+  const showSplitControls = !!dataset && mode !== "skip";
 
   return (
     <div className="space-y-8 w-full">
@@ -673,14 +671,25 @@ export default function Step1Upload({
                   </div>
                 )}
 
-                {mode === "raw" && mappingComplete && (
+                {mode === "raw" && (
                   <div className="bg-white border border-green-200 rounded-md p-4 space-y-3">
-                    <div className="font-medium text-gray-800">Preprocessing Options</div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-700">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium text-gray-800">Preprocessing Options</div>
+                      <div className="text-xs font-medium text-gray-500">
+                        {dataset.is_preprocessed ? "Completed" : "Required"}
+                      </div>
+                    </div>
+                    <div
+                      className={[
+                        "grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-700",
+                        !mappingComplete ? "opacity-60" : "",
+                      ].join(" ")}
+                    >
                       <label className="flex items-center gap-2">
                         <input
                           type="checkbox"
                           checked={!!options.sort_and_normalize_timestamps}
+                          disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                           onChange={(e) =>
                             setOptions((prev) => ({
                               ...prev,
@@ -694,6 +703,7 @@ export default function Step1Upload({
                         <input
                           type="checkbox"
                           checked={!!options.check_millisecond_order}
+                          disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                           onChange={(e) =>
                             setOptions((prev) => ({
                               ...prev,
@@ -707,6 +717,7 @@ export default function Step1Upload({
                         <input
                           type="checkbox"
                           checked={!!options.impute_categorical}
+                          disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                           onChange={(e) =>
                             setOptions((prev) => ({
                               ...prev,
@@ -720,6 +731,7 @@ export default function Step1Upload({
                         <input
                           type="checkbox"
                           checked={!!options.impute_numeric_neighbors}
+                          disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                           onChange={(e) =>
                             setOptions((prev) => ({
                               ...prev,
@@ -733,6 +745,7 @@ export default function Step1Upload({
                         <input
                           type="checkbox"
                           checked={!!options.drop_missing_timestamps}
+                          disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                           onChange={(e) =>
                             setOptions((prev) => ({
                               ...prev,
@@ -746,6 +759,7 @@ export default function Step1Upload({
                         <input
                           type="checkbox"
                           checked={!!options.fill_remaining_missing}
+                          disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                           onChange={(e) =>
                             setOptions((prev) => ({
                               ...prev,
@@ -759,6 +773,7 @@ export default function Step1Upload({
                         <input
                           type="checkbox"
                           checked={!!options.remove_duplicates}
+                          disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                           onChange={(e) =>
                             setOptions((prev) => ({
                               ...prev,
@@ -774,15 +789,19 @@ export default function Step1Upload({
                       <button
                         type="button"
                         onClick={handlePreprocess}
-                        disabled={isPreprocessing}
+                        disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                         className={[
                           "px-4 py-2 rounded-md text-sm border",
-                          isPreprocessing
+                          !mappingComplete || isPreprocessing || dataset.is_preprocessed
                             ? "border-gray-300 bg-gray-100 text-gray-500"
                             : "border-green-400 bg-green-100 text-green-900 hover:bg-green-200",
                         ].join(" ")}
                       >
-                        {isPreprocessing ? "Preprocessing..." : "Run preprocessing"}
+                        {dataset.is_preprocessed
+                          ? "Preprocessing complete"
+                          : isPreprocessing
+                          ? "Preprocessing..."
+                          : "Run preprocessing"}
                       </button>
 
                       {dataset.is_preprocessed && (
@@ -796,6 +815,10 @@ export default function Step1Upload({
                       )}
                     </div>
 
+                    {preprocessingLockedReason && (
+                      <div className="text-xs text-gray-500">{preprocessingLockedReason}</div>
+                    )}
+
                     {preprocessError && (
                       <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
                         <div className="font-medium">Preprocessing failed</div>
@@ -805,10 +828,20 @@ export default function Step1Upload({
                   </div>
                 )}
 
-                {showSplitControls && mappingComplete && (
+                {showSplitControls && (
                   <div className="bg-white border border-green-200 rounded-md p-4 space-y-3">
-                    <div className="font-medium text-gray-800">Generate Splits</div>
-                    <div className="space-y-4 text-sm text-gray-700">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium text-gray-800">Generate Splits</div>
+                      <div className="text-xs font-medium text-gray-500">
+                        {splitsReady ? "Completed" : "Required"}
+                      </div>
+                    </div>
+                    <div
+                      className={[
+                        "space-y-4 text-sm text-gray-700",
+                        splitLockedReason ? "opacity-60" : "",
+                      ].join(" ")}
+                    >
                       <div className="flex items-center justify-between">
                         <span className="font-medium text-brand-700">
                           Train {trainPct.toFixed(1)}%
@@ -848,6 +881,7 @@ export default function Step1Upload({
                             } as CSSProperties
                           }
                           onPointerDown={(e) => {
+                            if (splitLockedReason) return;
                             e.currentTarget.setPointerCapture(e.pointerId);
                             setDragHandle("train");
                           }}
@@ -866,6 +900,7 @@ export default function Step1Upload({
                             } as CSSProperties
                           }
                           onPointerDown={(e) => {
+                            if (splitLockedReason) return;
                             e.currentTarget.setPointerCapture(e.pointerId);
                             setDragHandle("val");
                           }}
@@ -880,17 +915,25 @@ export default function Step1Upload({
                       <button
                         type="button"
                         onClick={handleGenerateSplits}
-                        disabled={isGeneratingSplits}
+                        disabled={!!splitLockedReason || isGeneratingSplits || splitsReady}
                         className={[
                           "px-4 py-2 rounded-md text-sm border",
-                          isGeneratingSplits
+                          !!splitLockedReason || isGeneratingSplits || splitsReady
                             ? "border-gray-300 bg-gray-100 text-gray-500"
                             : "border-brand-400 bg-brand-50 text-brand-800 hover:bg-brand-100",
                         ].join(" ")}
                       >
-                        {isGeneratingSplits ? "Generating splits..." : "Generate splits"}
+                        {splitsReady
+                          ? "Splits generated"
+                          : isGeneratingSplits
+                          ? "Generating splits..."
+                          : "Generate splits"}
                       </button>
                     </div>
+
+                    {splitLockedReason && (
+                      <div className="text-xs text-gray-500">{splitLockedReason}</div>
+                    )}
 
                     {splitError && (
                       <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">

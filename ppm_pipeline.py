@@ -67,7 +67,7 @@ def detect_and_standardize_columns(df, verbose=False):
             if col in activity_patterns:
                 column_mapping[col] = 'Activity'
                 if verbose:
-                    print(f"[COLUMN DETECT] Mapping '{col}' → 'Activity'")
+                    print(f"[COLUMN DETECT] Mapping '{col}' -> 'Activity'")
                 break
     else:
         if verbose:

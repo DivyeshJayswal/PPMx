@@ -1,8 +1,8 @@
 // frontend/src/components/steps/Step6Review.tsx
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { DatasetUploadResponse, RunStatus } from "../../lib/api";
-import { artifactUrl } from "../../lib/api";
+import { artifactUrl, runLogsTextUrl } from "../../lib/api";
 
 type ManualMapping = {
   case_id: string;
@@ -78,6 +78,7 @@ export default function Step6Review({
   onViewResults,
 }: Step6ReviewProps) {
   const [renderedAt, setRenderedAt] = useState(() => Date.now());
+  const terminalRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
     if (pipelineStatus !== "running") return;
@@ -86,6 +87,11 @@ export default function Step6Review({
     }, 30000);
     return () => window.clearInterval(interval);
   }, [pipelineStatus]);
+
+  useEffect(() => {
+    if (!terminalRef.current) return;
+    terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+  }, [logs]);
 
   const datasetName = uploadedFile?.name ?? "-";
   const datasetId = dataset?.dataset_id ?? "-";
@@ -198,14 +204,33 @@ export default function Step6Review({
             </div>
           </div>
 
-          {logs.length > 0 && (
-            <div className="mt-4">
-              <div className="text-xs text-gray-500 mb-2">Recent logs</div>
-              <pre className="text-xs bg-brand-50 border border-brand-100 rounded-lg p-3 max-h-40 overflow-auto">
-                {logs.slice(-12).join("\n")}
-              </pre>
+        </div>
+      )}
+
+      {runId && (
+        <div className="border border-brand-100 rounded-xl p-6 bg-white">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium">Live Terminal</div>
+              <div className="text-xs text-gray-500">
+                Streaming the latest backend logs for this run.
+              </div>
             </div>
-          )}
+            <a
+              href={runLogsTextUrl(runId)}
+              className="rounded-md border border-brand-200 bg-white px-3 py-2 text-sm font-medium text-brand-700 hover:bg-brand-50"
+              download
+            >
+              Download logs
+            </a>
+          </div>
+
+          <pre
+            ref={terminalRef}
+            className="max-h-80 overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 text-green-100"
+          >
+            {logs.length > 0 ? logs.join("\n") : "Waiting for backend logs..."}
+          </pre>
         </div>
       )}
 

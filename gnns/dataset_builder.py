@@ -157,15 +157,21 @@ def build_graph(prefix: pd.DataFrame, vocabs, trace_attributes):
     next_act = act_map[first["next_activity"]]
     data.y_activity = torch.tensor([next_act], dtype=torch.long)
 
-    if k > 1:
-        t_next = prefix.iloc[1]["Timestamp"].timestamp()
+    if "next_timestamp" in prefix.columns:
+        t_next = prefix.iloc[0]["next_timestamp"].timestamp()
     else:
-        t_next = first["Timestamp"].timestamp()
+        if k > 1:
+            t_next = prefix.iloc[1]["Timestamp"].timestamp()
+        else:
+            t_next = first["Timestamp"].timestamp()
     data.y_timestamp = torch.tensor([np.log1p(t_next)], dtype=torch.float32)
 
-    t_end = prefix.iloc[-1]["Timestamp"].timestamp()
-    t_now = first["Timestamp"].timestamp()
-    remaining = max(0, t_end - t_now)
+    if "remaining_time_target" in prefix.columns:
+        remaining = float(prefix.iloc[0]["remaining_time_target"])
+    else:
+        t_end = prefix.iloc[-1]["Timestamp"].timestamp()
+        t_now = first["Timestamp"].timestamp()
+        remaining = max(0, t_end - t_now)
     data.y_remaining_time = torch.tensor([np.log1p(remaining)], dtype=torch.float32)
 
     return data

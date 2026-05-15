@@ -509,10 +509,10 @@ class TimestepSHAPExplainer(SHAPExplainer):
         positive_shap = np.where(filtered_shap > 0, filtered_shap, 0)
         negative_shap = np.where(filtered_shap < 0, filtered_shap, 0)
 
-        ax1.bar(x_values, positive_shap, color='#d62728', alpha=0.8,
-                label='Positive Shapley values', width=0.8)
-        ax1.bar(x_values, negative_shap, color='#1f77b4', alpha=0.8,
-                label='Negative Shapley values', width=0.8)
+        ax1.bar(x_values, positive_shap, color='#2ca02c', alpha=1.0,
+                label='Increases Prediction', width=0.8, edgecolor='black', linewidth=0.5)
+        ax1.bar(x_values, negative_shap, color='#d62728', alpha=1.0,
+                label='Decreases Prediction', width=0.8, edgecolor='black', linewidth=0.5)
 
         ax1.axhline(0, color='black', linewidth=1)
 
@@ -605,7 +605,7 @@ class TimestepSHAPExplainer(SHAPExplainer):
         fig, ax = plt.subplots(figsize=(14, 6))
 
         colors = ['#d62728' if val < 0 else '#2ca02c' for val in filtered_shap]
-        ax.bar(timesteps, filtered_shap, color=colors, alpha=0.7, edgecolor='black', linewidth=0.5)
+        ax.bar(timesteps, filtered_shap, color=colors, alpha=1.0, edgecolor='black', linewidth=0.5)
 
         ax.set_xticks(timesteps)
         ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
@@ -659,7 +659,7 @@ class TimestepSHAPExplainer(SHAPExplainer):
         fig, ax = plt.subplots(figsize=(14, 6))
         timesteps = np.arange(len(mean_shap_per_timestep))
 
-        ax.bar(timesteps, mean_shap_per_timestep, color='#2ca02c', alpha=0.7,
+        ax.bar(timesteps, mean_shap_per_timestep, color='#2ca02c', alpha=1.0,
                edgecolor='black', linewidth=0.5)
         ax.set_xlabel('Timestep Position', fontsize=12, fontweight='bold')
         ax.set_ylabel('Mean Absolute SHAP Value', fontsize=12, fontweight='bold')
@@ -1153,13 +1153,14 @@ class ExplainabilityBenchmark:
     """
     
     def __init__(self, model, task='activity', is_multi_input=False, 
-                 seq_shape=None, temp_shape=None, scaler=None):
+                 seq_shape=None, temp_shape=None, scaler=None, attribution_fn=None):
         self.model = model
         self.task = task
         self.is_multi_input = is_multi_input
         self.seq_shape = seq_shape
         self.temp_shape = temp_shape
         self.scaler = scaler
+        self.attribution_fn = attribution_fn
         self.results = {}
         
     def _predict(self, x_seq, x_temp=None):
@@ -1177,7 +1178,57 @@ class ExplainabilityBenchmark:
     def _get_baseline_value(self, x_seq):
         """Get baseline value for masking (mean or zero)."""
         return np.zeros_like(x_seq[0]) if len(x_seq.shape) > 1 else 0
-    
+
+    def _valid_positions(self, sequence):
+        if sequence is None:
+            return None
+        seq = np.asarray(sequence)
+        valid = np.where(seq > 0)[0]
+        if valid.size == 0:
+            return np.arange(seq.shape[0])
+        return valid
+
+    def _top_k_indices(self, sample_attr, k, valid_positions=None):
+        attr = np.asarray(sample_attr)
+        if valid_positions is None:
+            valid_positions = np.arange(attr.shape[0])
+        valid_positions = np.asarray(valid_positions, dtype=int)
+        if valid_positions.size == 0:
+            return np.array([], dtype=int)
+        if k >= valid_positions.size:
+            return valid_positions
+        valid_scores = np.abs(attr[valid_positions])
+        selected = np.argsort(valid_scores)[-k:]
+        return valid_positions[selected]
+
+    def _target_index(self, prediction):
+        if self.task != 'activity':
+            return None
+        pred = np.asarray(prediction).reshape(-1)
+        return int(np.argmax(pred))
+
+    def _target_score(self, prediction, target_idx=None):
+        pred = np.asarray(prediction)
+        if self.task == 'activity':
+            flat = pred.reshape(-1)
+            if target_idx is None:
+                target_idx = int(np.argmax(flat))
+            return float(flat[target_idx])
+        return float(np.asarray(pred).reshape(-1).mean())
+
+    def _prediction_change(self, original_pred, updated_pred, target_idx=None):
+        if self.task == 'activity':
+            return self._target_score(original_pred, target_idx) - self._target_score(updated_pred, target_idx)
+        return float(np.abs(np.asarray(original_pred) - np.asarray(updated_pred)).mean())
+
+    def _attribution_similarity(self, baseline_attr, perturbed_attr):
+        baseline = np.asarray(baseline_attr, dtype=float)
+        perturbed = np.asarray(perturbed_attr, dtype=float)
+        denom = np.linalg.norm(baseline) * np.linalg.norm(perturbed)
+        if denom == 0:
+            return 1.0 if np.linalg.norm(baseline - perturbed) == 0 else 0.0
+        return float(np.dot(baseline, perturbed) / denom)
+
     # -------------------------------------------------------------------------
     # 1. FAITHFULNESS METRICS
     # -------------------------------------------------------------------------
@@ -1212,10 +1263,13 @@ class ExplainabilityBenchmark:
             for i in range(n_samples):
                 # Original prediction
                 orig_pred = self._predict(x_seq[i:i+1], x_temp[i:i+1] if x_temp is not None else None)
+                target_idx = self._target_index(orig_pred)
                 
                 # Get top-k important feature indices
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = np.argsort(sample_attr)[-k:]
+                top_k_idx = self._top_k_indices(sample_attr, k, self._valid_positions(x_seq[i]))
+                if top_k_idx.size == 0:
+                    continue
                 
                 # Mask top-k features
                 x_masked = x_seq[i:i+1].copy()
@@ -1225,12 +1279,7 @@ class ExplainabilityBenchmark:
                 masked_pred = self._predict(x_masked, x_temp[i:i+1] if x_temp is not None else None)
                 
                 # Calculate prediction change
-                if self.task == 'activity':
-                    # For classification: change in predicted class probability
-                    pred_change = np.abs(orig_pred - masked_pred).max()
-                else:
-                    # For regression: absolute difference
-                    pred_change = np.abs(orig_pred - masked_pred).mean()
+                pred_change = self._prediction_change(orig_pred, masked_pred, target_idx)
                 
                 pred_changes.append(pred_change)
                 importance_sums.append(sample_attr[top_k_idx].sum())
@@ -1276,21 +1325,19 @@ class ExplainabilityBenchmark:
             
             for i in range(n_samples):
                 orig_pred = self._predict(x_seq[i:i+1], x_temp[i:i+1] if x_temp is not None else None)
+                target_idx = self._target_index(orig_pred)
                 
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = np.argsort(sample_attr)[-k:]
+                top_k_idx = self._top_k_indices(sample_attr, k, self._valid_positions(x_seq[i]))
+                if top_k_idx.size == 0:
+                    continue
                 
                 x_masked = x_seq[i:i+1].copy()
                 x_masked[0, top_k_idx] = 0
                 
                 masked_pred = self._predict(x_masked, x_temp[i:i+1] if x_temp is not None else None)
                 
-                if self.task == 'activity':
-                    orig_conf = orig_pred.max()
-                    masked_conf = masked_pred.max()
-                    comp = orig_conf - masked_conf
-                else:
-                    comp = np.abs(orig_pred - masked_pred).mean()
+                comp = self._prediction_change(orig_pred, masked_pred, target_idx)
                 
                 comp_scores.append(comp)
             
@@ -1323,9 +1370,12 @@ class ExplainabilityBenchmark:
             
             for i in range(n_samples):
                 orig_pred = self._predict(x_seq[i:i+1], x_temp[i:i+1] if x_temp is not None else None)
+                target_idx = self._target_index(orig_pred)
                 
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = np.argsort(sample_attr)[-k:]
+                top_k_idx = self._top_k_indices(sample_attr, k, self._valid_positions(x_seq[i]))
+                if top_k_idx.size == 0:
+                    continue
                 
                 # Keep ONLY top-k features, mask everything else
                 x_only_top = np.zeros_like(x_seq[i:i+1])
@@ -1333,12 +1383,7 @@ class ExplainabilityBenchmark:
                 
                 top_pred = self._predict(x_only_top, x_temp[i:i+1] if x_temp is not None else None)
                 
-                if self.task == 'activity':
-                    orig_conf = orig_pred.max()
-                    top_conf = top_pred.max()
-                    suff = orig_conf - top_conf
-                else:
-                    suff = np.abs(orig_pred - top_pred).mean()
+                suff = self._prediction_change(orig_pred, top_pred, target_idx)
                 
                 suff_scores.append(suff)
             
@@ -1367,35 +1412,57 @@ class ExplainabilityBenchmark:
             n_perturbations: Number of perturbation trials
         """
         print("Computing Stability...")
-        n_samples = min(len(x_seq), 20)  # Limit for computational efficiency
-        
-        stability_scores = []
-        
+        if self.attribution_fn is None:
+            raise RuntimeError("Stability requires an attribution recomputation callback.")
+
+        n_samples = min(len(x_seq), 20)
+        variance_scores = []
+        cosine_scores = []
+
         for i in range(n_samples):
-            original_attr = attributions[i]
+            original_attr = np.asarray(attributions[i], dtype=float)
             perturbed_attrs = []
-            
+
             for _ in range(n_perturbations):
-                # Add small noise (only to non-padding positions)
-                x_perturbed = x_seq[i:i+1].copy().astype(float)
-                non_pad_mask = x_perturbed[0] > 0
-                noise = np.random.normal(0, noise_std, x_perturbed.shape)
-                x_perturbed[0, non_pad_mask] += noise[0, non_pad_mask]
-                
-                # For sequence data, round to nearest integer (activity token)
-                x_perturbed = np.clip(np.round(x_perturbed), 0, None).astype(x_seq.dtype)
-                
-                perturbed_attrs.append(original_attr)  # Placeholder - ideally recompute
-            
-            # Calculate variance across perturbations
-            attr_variance = np.var(perturbed_attrs, axis=0).mean()
-            stability_scores.append(attr_variance)
-        
+                x_perturbed = x_seq[i:i+1].copy()
+                valid_positions = self._valid_positions(x_perturbed[0])
+                if valid_positions.size > 0:
+                    n_mask = max(1, int(np.ceil(valid_positions.size * 0.1)))
+                    mask_positions = np.random.choice(valid_positions, size=n_mask, replace=False)
+                    x_perturbed[0, mask_positions] = 0
+
+                x_temp_perturbed = None
+                if x_temp is not None:
+                    x_temp_perturbed = x_temp[i:i+1].copy().astype(float)
+                    temp_noise = np.random.normal(0.0, noise_std, x_temp_perturbed.shape)
+                    x_temp_perturbed = (x_temp_perturbed + temp_noise).astype(x_temp.dtype, copy=False)
+
+                perturbed_attr = self.attribution_fn(x_perturbed, x_temp_perturbed)
+                if perturbed_attr is None:
+                    continue
+                perturbed_arr = np.asarray(perturbed_attr, dtype=float).reshape(-1)
+                min_len = min(len(original_attr), len(perturbed_arr))
+                if min_len == 0:
+                    continue
+                perturbed_arr = perturbed_arr[:min_len]
+                baseline_arr = original_attr[:min_len]
+                perturbed_attrs.append(perturbed_arr)
+                cosine_scores.append(self._attribution_similarity(baseline_arr, perturbed_arr))
+
+            if perturbed_attrs:
+                stacked = np.stack(perturbed_attrs, axis=0)
+                variance_scores.append(float(np.var(stacked, axis=0).mean()))
+
+        mean_variance = float(np.mean(variance_scores)) if variance_scores else 0.0
+        max_variance = float(np.max(variance_scores)) if variance_scores else 0.0
+        mean_cosine = float(np.mean(cosine_scores)) if cosine_scores else 0.0
+
         return {
             'stability': {
-                'mean_variance': float(np.mean(stability_scores)),
-                'max_variance': float(np.max(stability_scores)),
-                'stability_score': float(1.0 / (1.0 + np.mean(stability_scores)))  # Higher = more stable
+                'mean_variance': mean_variance,
+                'max_variance': max_variance,
+                'mean_cosine_similarity': mean_cosine,
+                'stability_score': mean_cosine
             }
         }
     
@@ -1429,6 +1496,8 @@ class ExplainabilityBenchmark:
             for i in range(n_samples):
                 shap_attr = np.abs(shap_attributions[i])
                 lime_attr = np.abs(lime_attributions[i])
+                if not np.all(np.isfinite(shap_attr)) or not np.all(np.isfinite(lime_attr)):
+                    continue
                 
                 # Ensure same length
                 min_len = min(len(shap_attr), len(lime_attr))
@@ -1486,18 +1555,20 @@ class ExplainabilityBenchmark:
         
         for i in range(n_samples):
             orig_pred = self._predict(x_seq[i:i+1], x_temp[i:i+1] if x_temp is not None else None)
+            target_idx = self._target_index(orig_pred)
             
             sample_attr = np.abs(attributions[i])
-            sorted_indices = np.argsort(sample_attr)[::-1]  # Most important first
+            valid_positions = self._valid_positions(x_seq[i])
+            sorted_indices = self._top_k_indices(sample_attr, len(valid_positions), valid_positions)[::-1]
             
-            predictions = [orig_pred.flatten()[0] if self.task != 'activity' else orig_pred.max()]
+            predictions = [self._target_score(orig_pred, target_idx)]
             x_masked = x_seq[i:i+1].copy()
             
             # Progressively remove features
-            for j, idx in enumerate(sorted_indices[:min(10, seq_len)]):
+            for j, idx in enumerate(sorted_indices[:min(10, len(sorted_indices))]):
                 x_masked[0, idx] = 0
                 pred = self._predict(x_masked, x_temp[i:i+1] if x_temp is not None else None)
-                pred_val = pred.flatten()[0] if self.task != 'activity' else pred.max()
+                pred_val = self._target_score(pred, target_idx)
                 predictions.append(pred_val)
             
             # Count monotonic decreases
@@ -1555,13 +1626,16 @@ class ExplainabilityBenchmark:
         else:
             recency_corr, recency_p = 0.0, 1.0
         
+        valid_positions = positions[valid_mask]
+        valid_importance = avg_importance[valid_mask]
+        
         return {
             'temporal_consistency': {
                 'recency_correlation': float(recency_corr) if not np.isnan(recency_corr) else 0.0,
                 'recency_p_value': float(recency_p) if not np.isnan(recency_p) else 1.0,
                 'position_importance': avg_importance.tolist(),
-                'most_important_position': int(np.argmax(avg_importance)),
-                'least_important_position': int(np.argmin(avg_importance[valid_mask])) if valid_mask.any() else 0
+                'most_important_position': int(valid_positions[np.argmax(valid_importance)]) if valid_positions.size else 0,
+                'least_important_position': int(valid_positions[np.argmin(valid_importance)]) if valid_positions.size else 0
             }
         }
     
@@ -1917,8 +1991,48 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         os.makedirs(benchmark_dir, exist_ok=True)
         
         try:
+            def extract_sequence_attributions(raw_values, seq_len, explainer):
+                values = raw_values[0] if isinstance(raw_values, list) else raw_values
+                if values is None:
+                    return None
+                values = np.asarray(values)
+
+                if explainer.is_multi_input and hasattr(explainer, '_seq_flat_size'):
+                    if values.ndim == 2 and values.shape[1] >= explainer._seq_flat_size:
+                        values = values[:, :explainer._seq_flat_size]
+                    if getattr(explainer, '_seq_shape', None) == (seq_len,):
+                        values = values.reshape((values.shape[0], seq_len))
+                    elif values.ndim == 2 and values.shape[1] == explainer._seq_flat_size:
+                        values = values.reshape((values.shape[0],) + explainer._seq_shape)
+
+                if values.ndim == 1:
+                    values = values.reshape(1, -1)
+                if values.ndim == 2 and values.shape[1] == seq_len:
+                    return values
+
+                if values.ndim > 2:
+                    seq_axis = None
+                    for axis in range(1, values.ndim):
+                        if values.shape[axis] == seq_len:
+                            seq_axis = axis
+                            break
+                    if seq_axis is not None:
+                        values = np.moveaxis(values, seq_axis, 1)
+                        if values.ndim > 2:
+                            values = values.mean(axis=tuple(range(2, values.ndim)))
+                        return values
+
+                return values.reshape(values.shape[0], -1)[:, :seq_len]
+
             # Prepare test data for benchmark
-            if isinstance(test_data, (list, tuple)):
+            if se is not None and getattr(se, 'test_data', None) is not None:
+                bench_x_seq = np.asarray(se.test_data)
+                bench_x_temp = (
+                    np.asarray(se.test_data_temp)
+                    if getattr(se, 'test_data_temp', None) is not None
+                    else None
+                )
+            elif isinstance(test_data, (list, tuple)):
                 bench_x_seq = test_data[0][:num_samples]
                 bench_x_temp = test_data[1][:num_samples]
             else:
@@ -1928,76 +2042,97 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
             # Extract SHAP attributions (handle flattened format)
             shap_attr = None
             if se is not None and se.shap_values is not None:
-                shap_values_raw = se.shap_values.values
-                if isinstance(shap_values_raw, list):
-                    shap_values_raw = shap_values_raw[0]
-                
-                # Handle flattened multi-input case
-                if se.is_multi_input and hasattr(se, '_seq_flat_size'):
-                    if shap_values_raw.ndim == 2 and shap_values_raw.shape[1] >= se._seq_flat_size:
-                        shap_attr = shap_values_raw[:, :se._seq_flat_size]
+                shap_attr = extract_sequence_attributions(
+                    se.shap_values.values,
+                    bench_x_seq.shape[1],
+                    se
+                )
+                if shap_attr is not None and shap_attr.shape[0] != len(bench_x_seq):
+                    aligned = min(shap_attr.shape[0], len(bench_x_seq))
+                    print(f"[WARNING] Aligning benchmark samples to {aligned} rows for SHAP consistency.")
+                    shap_attr = shap_attr[:aligned]
+                    bench_x_seq = bench_x_seq[:aligned]
+                    if bench_x_temp is not None:
+                        bench_x_temp = bench_x_temp[:aligned]
+
+            attribution_fn = None
+            if se is not None and se.explainer is not None:
+                def attribution_fn(x_seq_batch, x_temp_batch=None):
+                    if se.is_multi_input:
+                        if x_temp_batch is None:
+                            return None
+                        seq_flat = x_seq_batch.reshape(len(x_seq_batch), -1)
+                        temp_flat = x_temp_batch.reshape(len(x_temp_batch), -1)
+                        explainer_input = np.hstack([seq_flat, temp_flat])
                     else:
-                        shap_attr = shap_values_raw
-                else:
-                    # For single-input or already correct shape
-                    seq_len = bench_x_seq.shape[1]
-                    if shap_values_raw.ndim == 2 and shap_values_raw.shape[1] == seq_len:
-                        shap_attr = shap_values_raw
-                    elif shap_values_raw.ndim > 2:
-                        # Find and extract sequence dimension
-                        for axis in range(1, shap_values_raw.ndim):
-                            if shap_values_raw.shape[axis] == seq_len:
-                                shap_attr = np.moveaxis(shap_values_raw, axis, 1)
-                                if shap_attr.ndim > 2:
-                                    shap_attr = shap_attr.mean(axis=tuple(range(2, shap_attr.ndim)))
-                                break
-                        if shap_attr is None:
-                            shap_attr = shap_values_raw.reshape(shap_values_raw.shape[0], -1)[:, :seq_len]
-                    else:
-                        shap_attr = shap_values_raw
+                        explainer_input = x_seq_batch
+                    fresh_values = se._call_explainer(explainer_input, max_evals=se.max_evals)
+                    seq_attr = extract_sequence_attributions(
+                        fresh_values.values,
+                        x_seq_batch.shape[1],
+                        se
+                    )
+                    if seq_attr is None or len(seq_attr) == 0:
+                        return None
+                    return np.asarray(seq_attr[0], dtype=float)
             
             # Extract LIME attributions if available
             lime_attr = None
-            if methods in ['lime', 'all'] and 'le' in dir() and le is not None and le.explanations:
+            if methods in ['lime', 'all'] and bench_x_seq is not None and len(bench_x_seq) > 0:
                 try:
+                    benchmark_lime = LIMEExplainer(model, task, label_encoder, scaler)
+                    if feature_config and 'vocab_size' in feature_config:
+                        benchmark_lime.vocab_size = int(feature_config['vocab_size'])
+                    elif 'le' in dir() and le is not None and le.vocab_size is not None:
+                        benchmark_lime.vocab_size = le.vocab_size
+                    benchmark_lime.initialize_explainer(train_data, num_classes)
+                    benchmark_test_data = (
+                        (bench_x_seq, bench_x_temp) if bench_x_temp is not None else bench_x_seq
+                    )
+                    benchmark_lime.explain_samples(
+                        benchmark_test_data,
+                        num_samples=len(bench_x_seq),
+                        num_features=int(bench_x_seq.shape[1])
+                    )
+
                     lime_attr_list = []
                     seq_len = bench_x_seq.shape[1]
-                    for exp in le.explanations:
-                        if exp is not None:
-                            # Extract feature weights from LIME explanation
-                            if task == 'activity' and hasattr(exp, 'top_labels') and exp.top_labels:
-                                exp_list = exp.as_list(label=exp.top_labels[0])
-                            else:
-                                exp_list = exp.as_list()
+                    for i, exp in enumerate(benchmark_lime.explanations):
+                        if exp is None:
+                            lime_attr_list.append(np.full(seq_len, np.nan))
+                            continue
 
-                            exp_map = dict(exp_list)
-                            weights = np.zeros(seq_len)
+                        if task == 'activity' and hasattr(exp, 'top_labels') and exp.top_labels:
+                            exp_list = exp.as_list(label=exp.top_labels[0])
+                        else:
+                            exp_list = exp.as_list()
 
-                            for feat_name, weight in exp_map.items():
-                                name = str(feat_name)
-                                # Try to extract position from feature name (Position_# or similar)
-                                match = re.search(r'(\d+)', name)
-                                if match and "Position" in name:
-                                    pos = int(match.group(1)) - 1
-                                    if 0 <= pos < seq_len:
-                                        weights[pos] += weight
+                        exp_map = dict(exp_list)
+                        weights = np.zeros(seq_len)
+
+                        for feat_name, weight in exp_map.items():
+                            name = str(feat_name)
+                            match = re.search(r'(\d+)', name)
+                            if match and "Position" in name:
+                                pos = int(match.group(1)) - 1
+                                if 0 <= pos < seq_len:
+                                    weights[pos] += weight
+                                continue
+
+                            if label_encoder is not None:
+                                activity_name = name.split('<=')[0].split('>')[0].strip()
+                                try:
+                                    token = label_encoder.transform([activity_name])[0] + 1
+                                except Exception:
                                     continue
+                                positions = np.where(bench_x_seq[i] == token)[0]
+                                if positions.size > 0:
+                                    per_pos = weight / positions.size
+                                    for pos in positions:
+                                        if 0 <= pos < seq_len:
+                                            weights[pos] += per_pos
 
-                                # Otherwise, try to map activity name to positions
-                                if label_encoder is not None:
-                                    activity_name = name.split('<=')[0].split('>')[0].strip()
-                                    try:
-                                        token = label_encoder.transform([activity_name])[0] + 1
-                                    except Exception:
-                                        continue
-                                    positions = np.where(bench_x_seq[0] == token)[0]
-                                    if positions.size > 0:
-                                        per_pos = weight / positions.size
-                                        for pos in positions:
-                                            if 0 <= pos < seq_len:
-                                                weights[pos] += per_pos
-
-                            lime_attr_list.append(weights)
+                        lime_attr_list.append(weights)
                     if lime_attr_list:
                         lime_attr = np.array(lime_attr_list)
                 except Exception as e:
@@ -2011,7 +2146,8 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
                 is_multi_input=isinstance(test_data, (list, tuple)),
                 seq_shape=getattr(se, '_seq_shape', None) if se else None,
                 temp_shape=getattr(se, '_temp_shape', None) if se else None,
-                scaler=scaler
+                scaler=scaler,
+                attribution_fn=attribution_fn
             )
             
             if shap_attr is not None:
