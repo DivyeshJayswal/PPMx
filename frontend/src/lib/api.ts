@@ -1,7 +1,9 @@
 // frontend/src/lib/api.ts
 
+const DEFAULT_API_BASE = import.meta.env.PROD ? "/api" : "http://localhost:8000";
+
 const RAW_API_BASE =
-  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+  import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE;
 
 export const API_BASE = RAW_API_BASE.replace(/\/+$/, ""); // trim trailing slashes
 
@@ -191,6 +193,11 @@ export async function listSampleDatasets(): Promise<SampleDatasetInfo[]> {
 
 export function sampleDatasetUrl(name: string): string {
   return `${API_BASE}/sample-datasets/${encodeURIComponent(name)}`;
+}
+
+export async function downloadSampleDataset(name: string): Promise<Blob> {
+  const res = await apiFetch(sampleDatasetUrl(name));
+  return res.blob();
 }
 
 export async function getDataset(dataset_id: string): Promise<DatasetMeta> {
