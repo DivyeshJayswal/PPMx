@@ -11,6 +11,25 @@ import tensorflow as tf
 plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams.update({'font.size': 11, 'font.family': 'sans-serif'})
 
+
+def _primary_prediction_output(preds):
+    """Use the main model output for explainers when Keras returns multiple outputs."""
+    if isinstance(preds, (list, tuple)):
+        if not preds:
+            return np.array([])
+        return np.asarray(preds[0])
+    return np.asarray(preds)
+
+
+def _to_scalar(value, default=0.0):
+    """Best-effort conversion of model/explainer metadata to a scalar for display."""
+    if value is None:
+        return default
+    arr = np.asarray(value)
+    if arr.size == 0:
+        return default
+    return float(arr.reshape(-1)[0])
+
 def _dir_has_png(path):
     if not os.path.isdir(path):
         return False
@@ -154,7 +173,8 @@ class SHAPExplainer:
                 x_seq = x_seq_flat.reshape((n_samples,) + self._seq_shape)
                 x_temp = x_temp_flat.reshape((n_samples,) + self._temp_shape)
                 preds = self.model.predict([x_seq, x_temp], verbose=0)
-                return preds if self.task == 'activity' else preds.flatten()
+                preds = _primary_prediction_output(preds)
+                return preds if self.task == 'activity' else preds.reshape(-1)
             
             self._predict_fn_flat = predict_fn_flat
             self._background_flat = background_flat
@@ -191,7 +211,8 @@ class SHAPExplainer:
                 print(f"[WARNING] SHAP explainer init fallback: {e}")
                 def predict_fn_single(x):
                     preds = self.model.predict(x, verbose=0)
-                    return preds if self.task == 'activity' else preds.flatten()
+                    preds = _primary_prediction_output(preds)
+                    return preds if self.task == 'activity' else preds.reshape(-1)
                 self.explainer = shap.Explainer(predict_fn_single, background_sample, max_evals=self.max_evals)
 
     def _retry_with_required_max_evals(self, err):
@@ -545,10 +566,6 @@ class TimestepSHAPExplainer(SHAPExplainer):
                 if isinstance(outputs, list) and len(outputs) > 1:
                     timestep_preds = outputs[1][0]
                     filtered_preds = timestep_preds[non_pad_mask]
-                    if self.scaler is not None:
-                        filtered_preds = self.scaler.inverse_transform(
-                            filtered_preds.reshape(-1, 1)
-                        ).flatten()
 
                     ax2 = ax1.twinx()
                     ax2.plot(x_values, filtered_preds, color='black', linewidth=2,
@@ -790,13 +807,15 @@ class LIMEExplainer:
                         x_seq = np.clip(np.round(x_seq), 0, vocab_size-1).astype(int)
                         temp_batch = np.repeat(current_temp, x_seq.shape[0], axis=0)
                         preds = self.model.predict([x_seq, temp_batch], verbose=0)
-                        return preds.flatten() if self.task != 'activity' else preds
+                        preds = _primary_prediction_output(preds)
+                        return preds.reshape(-1) if self.task != 'activity' else preds
                 else:
                     def predict_fn(x_seq):
                         if x_seq.ndim == 1: x_seq = x_seq.reshape(1, -1)
                         x_seq = np.clip(np.round(x_seq), 0, vocab_size-1).astype(int)
                         preds = self.model.predict(x_seq, verbose=0)
-                        return preds.flatten() if self.task != 'activity' else preds
+                        preds = _primary_prediction_output(preds)
+                        return preds.reshape(-1) if self.task != 'activity' else preds
 
                 exp = self.explainer.explain_instance(
                     self.test_data_seq[i],
@@ -829,7 +848,7 @@ class LIMEExplainer:
     
         # Use original_idx for filename, sample_idx for data access
         display_idx = original_idx if original_idx is not None else sample_idx 
-        print(f"Generating Research-Grade LIME Plot for sample {display_idx}...")
+        print(f"Generating LIME Plot for sample {display_idx}...")
         exp = self.explanations[sample_idx]
         current_seq = self.test_data_seq[sample_idx]  # Use local index
         
@@ -841,8 +860,14 @@ class LIMEExplainer:
                 else:
                     label_to_explain = 1 
                 
-                pred_probs = exp.predict_proba
-                confidence = pred_probs[label_to_explain] if pred_probs is not None else 0.0
+                pred_probs = np.asarray(exp.predict_proba) if getattr(exp, 'predict_proba', None) is not None else None
+                if pred_probs is not None:
+                    pred_probs = pred_probs.reshape(-1)
+                confidence = (
+                    _to_scalar(pred_probs[label_to_explain])
+                    if pred_probs is not None and 0 <= label_to_explain < len(pred_probs)
+                    else 0.0
+                )
                 pred_label = label_to_explain
                 if self.label_encoder is not None:
                     try:
@@ -862,20 +887,10 @@ class LIMEExplainer:
                 title = f"LIME Explanation (Sample {display_idx})\nPredicted Class: {pred_label} | Confidence: {confidence:.2f}{gt_text}"
                 lime_list = exp.as_list(label=label_to_explain)
             else:
-                raw_pred = exp.predicted_value
-                display_val = raw_pred
-                
-                if self.scaler is not None:
-                    unscaled = self.scaler.inverse_transform([[raw_pred]])[0][0]
-                    display_val = unscaled
+                display_val = _to_scalar(getattr(exp, 'predicted_value', None))
                 gt_val = None
                 if self.y_true is not None and sample_idx < len(self.y_true):
-                    gt_val = self.y_true[sample_idx]
-                    if self.scaler is not None:
-                        try:
-                            gt_val = self.scaler.inverse_transform([[gt_val]])[0][0]
-                        except Exception:
-                            pass
+                    gt_val = _to_scalar(self.y_true[sample_idx], default=None)
                 gt_text = f" | Ground Truth: {gt_val:.2f}" if gt_val is not None else ""
                 title = f"LIME Explanation (Sample {display_idx})\nPredicted Value: {display_val:.2f}{gt_text}"
                 lime_list = exp.as_list()
@@ -1169,11 +1184,12 @@ class ExplainabilityBenchmark:
             preds = self.model.predict([x_seq, x_temp], verbose=0)
         else:
             preds = self.model.predict(x_seq, verbose=0)
+        preds = _primary_prediction_output(preds)
         
         if self.task == 'activity':
             return preds
         else:
-            return preds.flatten()
+            return preds.reshape(-1)
     
     def _get_baseline_value(self, x_seq):
         """Get baseline value for masking (mean or zero)."""
