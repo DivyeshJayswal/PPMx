@@ -132,10 +132,13 @@ class GNNPredictor:
                     label_next_activity = activities[k]
                     next_timestamp = timestamps[k]
                     prefix_current_timestamp = timestamps[k - 1]
-                    remaining_time_target = max(
-                        0.0,
-                        (timestamps[-1] - prefix_current_timestamp).total_seconds(),
-                    )
+                    delta = timestamps[-1] - prefix_current_timestamp
+                    if hasattr(delta, "total_seconds"):
+                        delta_seconds = float(delta.total_seconds())
+                    else:
+                        # numpy.timedelta64 path
+                        delta_seconds = float(delta / np.timedelta64(1, "s"))
+                    remaining_time_target = max(0.0, delta_seconds)
                     for pos in range(k):
                         row = {
                             "CaseID": case_id,

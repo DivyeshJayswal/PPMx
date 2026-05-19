@@ -714,7 +714,8 @@ def run_event_time_prediction(dataset_path, output_dir, test_size, val_split, co
             num_samples=20,
             methods=explainability_method,
             scaler=predictor.scaler,
-            label_encoder=predictor.label_encoder
+            label_encoder=predictor.label_encoder,
+            timestamps=data.get('X_time_test')
         )
     
     print("\n" + "="*70)
@@ -789,7 +790,8 @@ def run_remaining_time_prediction(dataset_path, output_dir, test_size, val_split
             num_samples=20,
             methods=explainability_method,
             label_encoder=predictor.label_encoder,
-            scaler=predictor.scaler
+            scaler=predictor.scaler,
+            timestamps=data.get('X_time_test')
         )
     
     print("\n" + "="*70)

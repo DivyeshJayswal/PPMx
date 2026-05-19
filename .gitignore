@@ -65,3 +65,7 @@ tests/
 automated_batch_reruns/
 automated_batch_results_v2/
 ppmx_sample_dataset/
+testcase_results/
+testcase_dataset/
+testrun_results/
+today_changes_summary_2026-05-20.txt

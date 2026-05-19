@@ -322,7 +322,8 @@ def run_event_time_prediction(
             methods=explainability_method,
             label_encoder=predictor.label_encoder,
             scaler=predictor.scaler,
-            feature_config=feature_config
+            feature_config=feature_config,
+            timestamps=data.get('X_time_test')
         )
 
     return metrics
@@ -400,7 +401,8 @@ def run_remaining_time_prediction(
             methods=explainability_method,
             label_encoder=predictor.label_encoder,
             scaler=predictor.scaler,
-            feature_config=feature_config
+            feature_config=feature_config,
+            timestamps=data.get('X_time_test')
         )
 
     return metrics
