@@ -27,7 +27,7 @@ This diagram summarizes the frontend-backend structure and the APIs used across 
 
 **Quickstart (Frontend + Backend)**
 Clone the repository first and then follow the steps: 
-1. Create and activate a Python virtual environment.
+1. Create and activate a Python virtual environment inside PPMx dir.
 ```bash
 #Create Virtual environment
 python -m venv .venv
@@ -63,16 +63,16 @@ Add the following to `frontend/.env.local`:
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-5. Start the backend API.
+5. In the New Teminal (T2), Start the backend API.
 ```bash
 uvicorn backend.main:app --reload --port 8000
 ```
 
-6. In the New Teminal, Start the frontend dev server.
+6. In the previous Terminal (T1), Start the frontend dev server.
 ```bash
 npm run dev
 ```
-[Note: The program runs frontend and backend in 2 seperate Terminals Simultaneosly]
+[Note: The program runs frontend and backend in 2 seperate Terminals (T1 & T2) Simultaneosly]
 
 Frontend will be available at `http://localhost:5173`.
 
