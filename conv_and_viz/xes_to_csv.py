@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from pm4py.objects.log.importer.xes import importer as xes_importer
+from pm4py.objects.log.importer.xes.variants import iterparse as xes_iterparse
 from pm4py.objects.conversion.log import converter as log_converter
 
 from conv_and_viz.xes_utils import normalized_xes_path
@@ -9,7 +10,10 @@ from conv_and_viz.xes_utils import normalized_xes_path
 def load_event_log(xes_path: str):
     """Load an XES event log file."""
     with normalized_xes_path(xes_path) as import_path:
-        return xes_importer.apply(import_path)
+        parameters = {
+            xes_iterparse.Parameters.SHOW_PROGRESS_BAR: False,
+        }
+        return xes_importer.apply(import_path, parameters=parameters)
 
 
 def log_to_dataframe_preserve_all(event_log):

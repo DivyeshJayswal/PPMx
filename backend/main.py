@@ -487,6 +487,13 @@ def _infer_column_types(df: pd.DataFrame) -> Dict[str, str]:
     return out
 
 
+def _parse_datetime_diagnostic(series: pd.Series) -> pd.Series:
+    try:
+        return pd.to_datetime(series, errors="coerce", format="mixed")
+    except (TypeError, ValueError):
+        return pd.to_datetime(series, errors="coerce")
+
+
 def _compute_column_diagnostics(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     diagnostics: Dict[str, Dict[str, Any]] = {}
     timestamp_name_hints = ("timestamp", "time", "date")
@@ -509,7 +516,7 @@ def _compute_column_diagnostics(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
             or pd.api.types.is_string_dtype(series)
             or any(hint in str(col).lower() for hint in timestamp_name_hints)
         ):
-            parsed = pd.to_datetime(series, errors="coerce")
+            parsed = _parse_datetime_diagnostic(series)
             timestamp_parse_ratio = float(parsed.notna().sum() / non_null) if non_null > 0 else 0.0
 
         diagnostics[col] = {
