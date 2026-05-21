@@ -1,4 +1,5 @@
 # ppm_pipeline.py
+import gc
 import os
 import sys
 import warnings
@@ -46,6 +47,24 @@ if TENSORFLOW_AVAILABLE:
 
 if PYTORCH_AVAILABLE:
     from gnns.prediction.gnn_predictor import GNNPredictor
+
+
+def _cleanup_memory(model_type="transformer"):
+    """P2.1: Free GPU/CPU memory after model training + inference."""
+    gc.collect()
+    if model_type == "transformer" and TENSORFLOW_AVAILABLE:
+        try:
+            from tensorflow.keras import backend as K
+            K.clear_session()
+        except Exception:
+            pass
+    if model_type == "gnn" and PYTORCH_AVAILABLE:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 def detect_and_standardize_columns(df, verbose=False):
@@ -184,7 +203,9 @@ def run_next_activity_prediction(
         'Activity': 'concept:name',
         'Timestamp': 'time:timestamp'
     })
+    # P1.5: Preserve original Activity when using custom target_column
     if target_series is not None:
+        df['__original_activity'] = df['concept:name'].copy()
         df['concept:name'] = target_series
 
     predictor = NextActivityPredictor(
@@ -247,6 +268,7 @@ def run_next_activity_prediction(
             feature_config=feature_config
         )
 
+    _cleanup_memory("transformer")
     return metrics
 
 
@@ -326,6 +348,7 @@ def run_event_time_prediction(
             timestamps=data.get('X_time_test')
         )
 
+    _cleanup_memory("transformer")
     return metrics
 
 
@@ -405,6 +428,7 @@ def run_remaining_time_prediction(
             timestamps=data.get('X_time_test')
         )
 
+    _cleanup_memory("transformer")
     return metrics
 
 
@@ -434,6 +458,8 @@ def run_gnn_unified_prediction(
             raise RuntimeError(f"Target column not found: {target_column}")
         if pd.api.types.is_numeric_dtype(df[target_column]):
             raise RuntimeError("Invalid target column selected: must be categorical.")
+        # P1.5: Preserve original Activity column
+        df["__original_activity"] = df["Activity"].copy()
         df["Activity"] = df[target_column].astype(str)
 
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
@@ -507,4 +533,5 @@ def run_gnn_unified_prediction(
             tasks=tasks_to_explain,
         )
 
+    _cleanup_memory("gnn")
     return metrics

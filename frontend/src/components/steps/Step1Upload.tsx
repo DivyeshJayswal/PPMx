@@ -4,9 +4,10 @@ import UploadDropzone from "../ui/UploadDropZone";
 import Step2Mapping, { type ManualMapping } from "./Step2Mapping";
 import type { DatasetUploadResponse, SampleDatasetInfo, SplitConfig } from "../../lib/api";
 import {
-  downloadSampleDataset,
   generateSplits,
+  importSampleDataset,
   listSampleDatasets,
+  pollXesConversion,
   preprocessedDatasetUrl,
   preprocessDataset,
   splitDownloadUrl,
@@ -30,7 +31,7 @@ type Step1UploadProps = {
   onManualMappingChange: (patch: Partial<ManualMapping>) => void;
 };
 
-const MAX_UPLOAD_MB = 400;
+const MAX_UPLOAD_MB = Number(import.meta.env.VITE_MAX_UPLOAD_MB ?? 400);
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 const MIN_SPLIT_PCT = 1;
 const TRAIN_COLOR = "#1E3F7C";
@@ -96,6 +97,7 @@ export default function Step1Upload({
   const [sampleDatasets, setSampleDatasets] = useState<SampleDatasetInfo[]>([]);
   const [selectedSample, setSelectedSample] = useState("");
 
+  const [isConverting, setIsConverting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preprocessError, setPreprocessError] = useState<string | null>(null);
   const [splitError, setSplitError] = useState<string | null>(null);
@@ -286,6 +288,36 @@ export default function Step1Upload({
     setIsUploading(true);
     try {
       const resp = await uploadDataset(file, { preprocessed: mode === "preprocessed" });
+
+      // XES files: backend returns immediately with conversion_status="converting"
+      // Need to poll until PM4Py finishes parsing
+      if (resp.conversion_status === "converting") {
+        setIsUploading(false);
+        setIsConverting(true);
+        try {
+          const meta = await pollXesConversion(resp.dataset_id);
+          // Build full response from completed meta
+          const fullResp: DatasetUploadResponse = {
+            ...resp,
+            num_events: meta.num_events,
+            num_cases: meta.num_cases,
+            columns: meta.columns,
+            column_types: meta.column_types,
+            detected_mapping: meta.detected_mapping,
+            column_diagnostics: meta.column_diagnostics,
+            preview: [], // Preview stored separately for XES
+            conversion_status: "ready",
+          };
+          onUploaded(file, fullResp);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "XES conversion failed.";
+          setError(msg);
+        } finally {
+          setIsConverting(false);
+        }
+        return;
+      }
+
       onUploaded(file, resp);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Upload failed.";
@@ -307,16 +339,39 @@ export default function Step1Upload({
     }
     setIsSampleLoading(true);
     try {
-      const blob = await downloadSampleDataset(selectedSample);
       const type = selectedSample.toLowerCase().endsWith(".csv")
         ? "text/csv"
         : "application/octet-stream";
-      const file = new File([blob], selectedSample, { type });
+      const file = new File([], selectedSample, { type });
 
       onModeChange("raw");
-      const uploaded = await uploadDataset(file, { preprocessed: false });
-      onUploaded(file, uploaded);
-      onSampleDataLoaded?.(file, uploaded);
+      const uploaded = await importSampleDataset(selectedSample);
+
+      // Handle XES conversion polling for sample datasets too
+      if (uploaded.conversion_status === "converting") {
+        setIsConverting(true);
+        try {
+          const meta = await pollXesConversion(uploaded.dataset_id);
+          const fullResp: DatasetUploadResponse = {
+            ...uploaded,
+            num_events: meta.num_events,
+            num_cases: meta.num_cases,
+            columns: meta.columns,
+            column_types: meta.column_types,
+            detected_mapping: meta.detected_mapping,
+            column_diagnostics: meta.column_diagnostics,
+            preview: [],
+            conversion_status: "ready",
+          };
+          onUploaded(file, fullResp);
+          onSampleDataLoaded?.(file, fullResp);
+        } finally {
+          setIsConverting(false);
+        }
+      } else {
+        onUploaded(file, uploaded);
+        onSampleDataLoaded?.(file, uploaded);
+      }
     } catch (e) {
       setSampleError(e instanceof Error ? e.message : "Failed to load sample data.");
     } finally {
@@ -548,13 +603,23 @@ export default function Step1Upload({
                     <UploadDropzone
                       onFileSelect={handleUpload}
                       accept={format === "csv" ? ".csv" : format === "xes" ? ".xes,.xes.gz" : ".csv,.xes,.xes.gz"}
-                      disabled={!format}
+                      disabled={!format || isUploading || isConverting}
                     />
                   </div>
                 </div>
 
                 {isUploading && (
-                  <div className="text-sm text-gray-600">Uploading and parsing dataset...</div>
+                  <div className="text-sm text-gray-600">Uploading dataset...</div>
+                )}
+                {isConverting && (
+                  <div className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <div className="font-medium">Converting XES file...</div>
+                    <div className="mt-1">PM4Py is parsing the event log. This may take a few minutes for large files.</div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <div className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full" />
+                      <span>Processing...</span>
+                    </div>
+                  </div>
                 )}
 
                 {error && (
@@ -988,4 +1053,3 @@ export default function Step1Upload({
     </div>
   );
 }
-

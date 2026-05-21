@@ -1855,7 +1855,13 @@ class ExplainabilityBenchmark:
 
 def run_transformer_explainability(model, data, output_dir, task='activity', num_samples=50, methods='all', label_encoder=None, scaler=None, timestamps=None, feature_config=None, run_benchmark=True):
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    # Normalize methods: lists → "all", always lowercase string
+    if isinstance(methods, (list, tuple)):
+        methods = 'all'
+    if isinstance(methods, str):
+        methods = methods.strip().lower()
+
     # Initialize explainer references
     se = None  # SHAP explainer
     le = None  # LIME explainer
@@ -2205,11 +2211,22 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
     print(f"Results saved to: {output_dir}")
     print("="*60)
     print("\nGenerated outputs:")
-    print("  [OK] SHAP global importance plots")
-    if task != 'activity' and methods in ['shap', 'all']:
-        print("  [OK] Temporal attribution plots")
-    print(f"  [OK] LIME local explanations ({num_samples} diverse samples)")
-    print("  [OK] Feature importance summary CSV")
+    if shap_dir and _dir_has_png(shap_dir):
+        print("  [OK] SHAP global importance plots")
+        if task != 'activity':
+            print("  [OK] Temporal attribution plots")
+    elif methods in ['shap', 'all']:
+        print("  [MISS] SHAP — no plots generated")
+    if lime_dir and _dir_has_png(lime_dir):
+        print(f"  [OK] LIME local explanations ({num_samples} diverse samples)")
+    elif methods in ['lime', 'all']:
+        print("  [MISS] LIME — no plots generated")
+    summary_csv = os.path.join(output_dir, "feature_importance_summary.csv")
+    if os.path.exists(summary_csv):
+        print("  [OK] Feature importance summary CSV")
+    # Count actual files saved
+    total_files = sum(len(f) for _, _, f in os.walk(output_dir))
+    print(f"  Total files: {total_files}")
     print("  [OK] Method comparison report")
     if run_benchmark and benchmark_results:
         print("  [OK] Benchmark evaluation metrics (JSON + CSV)")

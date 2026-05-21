@@ -1,5 +1,6 @@
 # backend/runner/run_job.py
 import argparse
+import gc
 import json
 import os
 import traceback
@@ -47,11 +48,19 @@ def list_artifacts(artifacts_dir: str) -> list[str]:
 
 
 def normalize_explainability(value: Any) -> Any:
-    # Frontend/Swagger often sends "none"
+    """Normalize explainability to string or None.
+
+    The explainability modules expect a string like 'shap', 'lime', 'all',
+    'gradient', 'graphlime' — NOT a list. If a list was persisted from an
+    older request.json, convert it back to 'all'.
+    """
     if value is None:
         return None
     if isinstance(value, str) and value.strip().lower() in {"none", "null", ""}:
         return None
+    # Guard: if list was stored (legacy), convert back to "all"
+    if isinstance(value, list):
+        return "all"
     return value
 
 
@@ -314,6 +323,20 @@ def main():
         })
         patch_status(status_path, status="failed", finished_at=utc_now(), error=str(e))
         raise
+    finally:
+        # P2.1: Force memory cleanup after every run (success or failure)
+        gc.collect()
+        try:
+            from tensorflow.keras import backend as K
+            K.clear_session()
+        except Exception:
+            pass
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

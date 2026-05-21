@@ -156,8 +156,14 @@ class NextActivityPredictor:
                 case_ids_list.append(case_id)
                 prefix_lengths.append(len(prefix))
         
+        if not sequences:
+            raise ValueError(
+                "No valid prefix sequences generated. All cases may have only 1 event. "
+                "Need cases with 2+ events for next-activity prediction."
+            )
+
         max_len = max(len(seq) for seq in sequences)
-        
+
         metadata = {
             'case_ids': case_ids_list,
             'prefix_lengths': prefix_lengths,

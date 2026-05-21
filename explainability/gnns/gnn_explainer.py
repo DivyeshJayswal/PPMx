@@ -1996,7 +1996,13 @@ def generate_comparison_report(grad_dir, lime_dir, output_dir, task='activity'):
 
 def run_gnn_explainability(model, data, output_dir, device, vocabularies=None, num_samples=50, methods='all', tasks=None, scaler=None, y_true=None, run_benchmark=True):
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    # Normalize methods: lists → "all", always lowercase string
+    if isinstance(methods, (list, tuple)):
+        methods = 'all'
+    if isinstance(methods, str):
+        methods = methods.strip().lower()
+
     print("\n" + "="*70)
     print("GNN EXPLAINABILITY - SHAP-STYLE VISUALIZATION")
     print("="*70)

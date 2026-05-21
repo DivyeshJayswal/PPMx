@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 from conv_and_viz.xes_to_csv import load_event_log, log_to_dataframe_preserve_all
+from utils.column_detector import detect_and_standardize_columns
 
 try:
     import pm4py
@@ -80,7 +81,13 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
         default_options["sort_and_normalize_timestamps"]
         or default_options["check_millisecond_order"]
     ):
+        # P1.3: Parse timestamps and coerce errors to NaT
         df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors='coerce')
+        nat_count = df[timestamp_col].isna().sum()
+        if nat_count > 0 and default_options["drop_missing_timestamps"]:
+            print(f"[P1.3] Found {nat_count} NaT values in timestamp column. Will drop these rows.")
+            df = df.dropna(subset=[timestamp_col])
+            print(f"[P1.3] Dropped {nat_count} rows with invalid timestamps. Remaining rows: {len(df)}")
 
     if case_col and timestamp_col and default_options["check_millisecond_order"]:
         df['Timestamp_Sec'] = df[timestamp_col].dt.floor('s')
@@ -192,16 +199,41 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
     else:
         print("Duplicate rows found, but removal is disabled.")
     
+    # P1.4: Detect and remove zero-variance columns
+    print("\n--- Checking for Zero-Variance Columns ---")
+    zero_variance_cols = []
+    for col in df.columns:
+        if col in ['CaseID', 'Activity', 'Timestamp', 'Resource']:
+            # Skip core event log columns
+            continue
+        unique_count = df[col].nunique()
+        if unique_count <= 1:
+            zero_variance_cols.append(col)
+
+    if zero_variance_cols:
+        print(f"[P1.4] Found {len(zero_variance_cols)} zero-variance columns: {zero_variance_cols}")
+        df = df.drop(columns=zero_variance_cols)
+        print(f"[P1.4] Removed zero-variance columns. Remaining columns: {len(df.columns)}")
+    else:
+        print("[P1.4] No zero-variance columns found.")
+
+    # P1.1: Validate column structure and minimum event/case counts
+    try:
+        df, mapping, detected = detect_and_standardize_columns(df, verbose=True, min_cases=2, min_events=10)
+    except ValueError as e:
+        print(f"[X] Column validation failed: {e}")
+        raise
+
     output_dir = os.path.dirname(output_csv_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    
+
     df.to_csv(output_csv_path, index=False)
     print(f"\n[OK] Preprocessed file saved at: {output_csv_path}")
-    
+
     print(f"\nFinal dataset shape: {df.shape}")
     print(f"Columns: {list(df.columns)}")
-    
+
     return df
 
 
