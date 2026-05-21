@@ -711,7 +711,7 @@ def _load_run_status(run_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Run not found")
     return _read_json(status_path)
  
-
+ 
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
