@@ -21,12 +21,9 @@ export default function Sidebar({
     <aside className="w-72 border-r border-brand-100 bg-white pt-20 px-6 pb-6">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-lg font-semibold text-brand-900">
-          Pipeline Configuration
-        </h1>
-        <p className="text-sm text-brand-600">
+        <h1 className="text-xl font-semibold text-brand-900">
           PPMExplainer
-        </p>
+        </h1>
       </div>
 
       {/* Steps */}

@@ -107,7 +107,7 @@ export default function Step1Upload({
     check_millisecond_order: true,
     impute_categorical: true,
     impute_numeric_neighbors: true,
-    drop_missing_timestamps: true,
+    drop_cases_with_missing_timestamps: false,
     fill_remaining_missing: true,
     remove_duplicates: true,
   });
@@ -198,7 +198,7 @@ export default function Step1Upload({
       check_millisecond_order: true,
       impute_categorical: true,
       impute_numeric_neighbors: true,
-      drop_missing_timestamps: true,
+      drop_cases_with_missing_timestamps: false,
       fill_remaining_missing: true,
       remove_duplicates: true,
     });
@@ -742,16 +742,16 @@ export default function Step1Upload({
                       <label className="flex items-center gap-2">
                         <input
                           type="checkbox"
-                          checked={!!options.drop_missing_timestamps}
+                          checked={!!options.drop_cases_with_missing_timestamps}
                           disabled={!mappingComplete || isPreprocessing || dataset.is_preprocessed}
                           onChange={(e) =>
                             setOptions((prev) => ({
                               ...prev,
-                              drop_missing_timestamps: e.target.checked,
+                              drop_cases_with_missing_timestamps: e.target.checked,
                             }))
                           }
                         />
-                        Drop rows missing timestamps
+                        Drop entire cases with missing timestamps
                       </label>
                       <label className="flex items-center gap-2">
                         <input

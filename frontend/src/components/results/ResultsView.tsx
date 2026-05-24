@@ -278,12 +278,17 @@ export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProp
       </div>
 
       <div className="shrink-0 px-8 pb-6 border-t border-brand-100 bg-white">
-        <button
-          className="px-4 py-2 border border-brand-200 rounded-md text-sm text-brand-700 hover:bg-brand-50"
-          onClick={onBackToPipeline}
-        >
-          Back to Pipeline
-        </button>
+        <div className="flex items-center justify-between gap-4 pt-4">
+          <button
+            className="px-4 py-2 border border-brand-200 rounded-md text-sm text-brand-700 hover:bg-brand-50"
+            onClick={onBackToPipeline}
+          >
+            Back to Pipeline
+          </button>
+          <p className="text-sm text-gray-500">
+            Built with <span className="text-pink-500">❤</span> at TUM
+          </p>
+        </div>
       </div>
 
       {activeImage && (

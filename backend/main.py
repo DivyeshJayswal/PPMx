@@ -437,7 +437,7 @@ class PreprocessOptions(BaseModel):
     check_millisecond_order: bool = True
     impute_categorical: bool = True
     impute_numeric_neighbors: bool = True
-    drop_missing_timestamps: bool = True
+    drop_cases_with_missing_timestamps: bool = False
     fill_remaining_missing: bool = True
     remove_duplicates: bool = True
 

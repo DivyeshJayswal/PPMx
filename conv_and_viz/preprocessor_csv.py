@@ -38,7 +38,7 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
         "check_millisecond_order": True,
         "impute_categorical": True,
         "impute_numeric_neighbors": True,
-        "drop_missing_timestamps": True,
+        "drop_cases_with_missing_timestamps": False,
         "fill_remaining_missing": True,
         "remove_duplicates": True,
     }
@@ -58,10 +58,34 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
     
     print(f"Loaded {len(df)} events from {input_path}")
     print(f"Original columns: {list(df.columns)}")
+    print("\n--- Preprocessing option confirmation ---")
+    option_labels = {
+        "sort_and_normalize_timestamps": "Sort and normalize timestamps",
+        "check_millisecond_order": "Check millisecond ordering",
+        "impute_categorical": "Impute categorical values",
+        "impute_numeric_neighbors": "Impute numeric values (neighbors)",
+        "drop_cases_with_missing_timestamps": "Drop entire cases with missing timestamps",
+        "fill_remaining_missing": "Fill remaining missing values",
+        "remove_duplicates": "Remove duplicate rows",
+    }
+    for key, label in option_labels.items():
+        status = "ENABLED" if default_options[key] else "DISABLED"
+        print(f"{label}: {status}")
+
+    def log_option_completion(option_key, detail):
+        print(f"[Preprocessing Complete] {option_labels[option_key]}: {detail}")
 
     # Only auto-detect timestamp column (no other column detection).
     timestamp_col = None
     case_col = None
+    raw_missing_timestamp_mask = None
+    case_patterns = [
+        "case:concept:name",
+        "case:id",
+        "case_id",
+        "caseid",
+        "case id",
+    ]
     timestamp_patterns = [
         "time:timestamp",
         "timestamp",
@@ -72,9 +96,14 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
         "completetime",
     ]
     for col in df.columns:
+        if case_col is None and col.strip().lower() in case_patterns:
+            case_col = col
         if col.strip().lower() in timestamp_patterns:
             timestamp_col = col
             break
+
+    if timestamp_col:
+        raw_missing_timestamp_mask = df[timestamp_col].isna()
 
     if timestamp_col and (
         default_options["sort_and_normalize_timestamps"]
@@ -97,6 +126,11 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
         print(f"Total Unique Cases where Milliseconds Determine Order: {cases_affected_by_milliseconds}")
 
         df.drop(columns=['Timestamp_Sec', 'Prev_CaseID', 'Prev_Timestamp_Sec'], inplace=True)
+        log_option_completion("check_millisecond_order", "completed")
+    elif default_options["check_millisecond_order"]:
+        log_option_completion("check_millisecond_order", "skipped (case or timestamp column not detected)")
+    else:
+        log_option_completion("check_millisecond_order", "skipped (disabled)")
 
     if timestamp_col and default_options["sort_and_normalize_timestamps"]:
         df[timestamp_col] = df[timestamp_col].dt.floor('s')
@@ -104,9 +138,16 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
             df[timestamp_col] = df[timestamp_col].dt.tz_localize(None)
         # Drop timezone offsets like +00:00 in string representation
         df[timestamp_col] = df[timestamp_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+        log_option_completion("sort_and_normalize_timestamps", "completed")
+    elif default_options["sort_and_normalize_timestamps"]:
+        log_option_completion("sort_and_normalize_timestamps", "skipped (timestamp column not detected)")
+    else:
+        log_option_completion("sort_and_normalize_timestamps", "skipped (disabled)")
     
     print("\n--- Checking Data Types and Handling Wrong Values ---")
     
+    categorical_imputed = 0
+    numeric_imputed = 0
     if default_options["impute_categorical"] or default_options["impute_numeric_neighbors"]:
         for col in df.columns:
             if col in [case_col, timestamp_col]:
@@ -115,10 +156,12 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
             detected_type = detect_column_type(df[col])
             
             if detected_type == 'categorical' and default_options["impute_categorical"]:
+                categorical_imputed += int(df[col].isna().sum())
                 df[col] = df[col].ffill().bfill()
             
             elif detected_type == 'numerical' and default_options["impute_numeric_neighbors"]:
                 mask = df[col].isna()
+                numeric_imputed += int(mask.sum())
                 for idx in df[mask].index:
                     prev_idx = idx - 1
                     next_idx = idx + 1
@@ -132,12 +175,25 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
                         df.loc[idx, col] = prev_val
                     elif pd.notna(next_val):
                         df.loc[idx, col] = next_val
+    if default_options["impute_categorical"]:
+        log_option_completion("impute_categorical", f"completed ({categorical_imputed} missing values processed)")
+    else:
+        log_option_completion("impute_categorical", "skipped (disabled)")
+    if default_options["impute_numeric_neighbors"]:
+        log_option_completion("impute_numeric_neighbors", f"completed ({numeric_imputed} missing values processed)")
+    else:
+        log_option_completion("impute_numeric_neighbors", "skipped (disabled)")
 
     print("\n--- Handling Null and Zero Values ---")
     missing_cols = []
-    if default_options["drop_missing_timestamps"] or default_options["fill_remaining_missing"]:
+    if (
+        default_options["drop_cases_with_missing_timestamps"]
+        or default_options["fill_remaining_missing"]
+    ):
         missing_cols = df.columns[df.isnull().any()].tolist()
     
+    dropped_case_rows = 0
+    dropped_case_count = 0
     if missing_cols:
         print(f"Columns with missing values: {missing_cols}")
         missing_before = df[missing_cols].isnull().sum()
@@ -146,18 +202,31 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
         numeric_cols = [col for col in missing_cols if detect_column_type(df[col]) == 'numerical']
         categorical_cols = [col for col in missing_cols if detect_column_type(df[col]) == 'categorical']
         datetime_cols = [col for col in missing_cols if detect_column_type(df[col]) == 'datetime']
-        
-        if default_options["drop_missing_timestamps"] and timestamp_col and timestamp_col in missing_cols:
+
+        if (
+            default_options["drop_cases_with_missing_timestamps"]
+            and timestamp_col
+            and case_col
+            and raw_missing_timestamp_mask is not None
+            and raw_missing_timestamp_mask.any()
+        ):
+            cases_before = df[case_col].nunique()
             rows_before = len(df)
-            df = df.dropna(subset=[timestamp_col])
-            rows_after = len(df)
-            if rows_before > rows_after:
-                print(f"Removed {rows_before - rows_after} rows with missing timestamps")
-            missing_cols.remove(timestamp_col)
-            if timestamp_col in numeric_cols:
-                numeric_cols.remove(timestamp_col)
-            if timestamp_col in categorical_cols:
-                categorical_cols.remove(timestamp_col)
+            bad_cases = df.loc[raw_missing_timestamp_mask, case_col].dropna().unique()
+            if len(bad_cases) > 0:
+                df = df[~df[case_col].isin(bad_cases)].copy()
+                dropped_case_rows = rows_before - len(df)
+                dropped_case_count = cases_before - df[case_col].nunique()
+                print(
+                    f"Removed {dropped_case_rows} rows across {dropped_case_count} "
+                    "cases with directly missing timestamps"
+                )
+                missing_cols = [col for col in missing_cols if col in df.columns and df[col].isnull().any()]
+                numeric_cols = [col for col in numeric_cols if col in missing_cols]
+                categorical_cols = [col for col in categorical_cols if col in missing_cols]
+                datetime_cols = [col for col in datetime_cols if col in missing_cols]
+        elif default_options["drop_cases_with_missing_timestamps"] and not case_col:
+            print("Skipping case-level timestamp removal because no case column was detected.")
         
         if default_options["fill_remaining_missing"]:
             for col in numeric_cols:
@@ -174,6 +243,28 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
     else:
         print("No missing values found.")
 
+    if default_options["drop_cases_with_missing_timestamps"]:
+        if not case_col:
+            log_option_completion("drop_cases_with_missing_timestamps", "skipped (case column not detected)")
+        elif not timestamp_col:
+            log_option_completion("drop_cases_with_missing_timestamps", "skipped (timestamp column not detected)")
+        else:
+            log_option_completion(
+                "drop_cases_with_missing_timestamps",
+                f"completed ({dropped_case_rows} rows removed across {dropped_case_count} cases)"
+            )
+    else:
+        log_option_completion("drop_cases_with_missing_timestamps", "skipped (disabled)")
+
+    if default_options["fill_remaining_missing"]:
+        remaining_missing_total = int(df.isnull().sum().sum())
+        log_option_completion(
+            "fill_remaining_missing",
+            f"completed ({remaining_missing_total} missing values remain)"
+        )
+    else:
+        log_option_completion("fill_remaining_missing", "skipped (disabled)")
+
     initial_rows = len(df)
     duplicate_rows = df.duplicated().sum()
     
@@ -187,10 +278,16 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
         final_rows = len(df)
         print(f"Removed {duplicate_rows} duplicate rows.")
         print(f"Total rows after removal: {final_rows}")
+        log_option_completion("remove_duplicates", f"completed ({duplicate_rows} duplicate rows removed)")
     elif duplicate_rows == 0:
         print("No exact duplicate rows found.")
+        if default_options["remove_duplicates"]:
+            log_option_completion("remove_duplicates", "completed (0 duplicate rows removed)")
+        else:
+            log_option_completion("remove_duplicates", "skipped (disabled)")
     else:
         print("Duplicate rows found, but removal is disabled.")
+        log_option_completion("remove_duplicates", "skipped (disabled)")
     
     output_dir = os.path.dirname(output_csv_path)
     if output_dir:
