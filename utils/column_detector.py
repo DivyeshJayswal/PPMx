@@ -152,21 +152,52 @@ class UniversalColumnDetector:
         return "\n".join(report)
 
 
-def detect_and_standardize_columns(df, verbose=True):
+def detect_and_standardize_columns(df, verbose=True, min_cases=2, min_events=10):
+    """
+    Detect, map, and validate event log columns.
+
+    Args:
+        df: Input DataFrame
+        verbose: Print detection report
+        min_cases: Minimum number of unique cases required
+        min_events: Minimum number of events required
+
+    Returns:
+        Tuple of (standardized_df, mapping, detected)
+
+    Raises:
+        ValueError: If columns missing or event log too small
+    """
     detector = UniversalColumnDetector(df)
     detected, mapping = detector.detect_all()
-    
+
     if verbose:
         print(detector.get_detection_report())
-    
+
     standardized_df = detector.apply_mapping()
-    
+
     required = ['CaseID', 'Activity', 'Timestamp']
     missing = [col for col in required if col not in standardized_df.columns]
-    
+
     if missing:
         raise ValueError(f"Missing required columns after detection: {missing}")
-    
+
+    # P1.1: Validate minimum case and event counts
+    num_cases = standardized_df['CaseID'].nunique()
+    num_events = len(standardized_df)
+
+    if num_cases < min_cases:
+        raise ValueError(
+            f"Insufficient cases: {num_cases} found, minimum {min_cases} required. "
+            f"Event log too sparse for model training."
+        )
+
+    if num_events < min_events:
+        raise ValueError(
+            f"Insufficient events: {num_events} found, minimum {min_events} required. "
+            f"Event log too small for model training."
+        )
+
     return standardized_df, mapping, detected
 
 

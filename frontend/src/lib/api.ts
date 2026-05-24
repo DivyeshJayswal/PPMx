@@ -46,6 +46,8 @@ export type DatasetUploadResponse = {
   detected_mapping: Record<string, string>;
   column_diagnostics?: Record<string, ColumnDiagnostic>;
   preview: Array<Record<string, JsonValue>>;
+  conversion_status?: "converting" | "ready" | "failed" | null;
+  conversion_error?: string | null;
 };
 
 export type DatasetMeta = {
@@ -67,6 +69,8 @@ export type DatasetMeta = {
   detected_mapping: Record<string, string>;
   column_diagnostics?: Record<string, ColumnDiagnostic>;
   created_at: string;
+  conversion_status?: "converting" | "ready" | "failed" | null;
+  conversion_error?: string | null;
 };
 
 export type RunStatus = {
@@ -186,6 +190,47 @@ export async function uploadDataset(
   return (await res.json()) as DatasetUploadResponse;
 }
 
+export async function getDataset(datasetId: string): Promise<DatasetMeta> {
+  const res = await apiFetch(`${API_BASE}/datasets/${datasetId}`);
+  return (await res.json()) as DatasetMeta;
+}
+
+/**
+ * Poll dataset until XES conversion completes.
+ * Returns full DatasetMeta (with columns, preview, etc.) when ready.
+ * Throws on failure or timeout.
+ */
+export async function pollXesConversion(
+  datasetId: string,
+  opts?: { intervalMs?: number; timeoutMs?: number }
+): Promise<DatasetMeta> {
+  const intervalMs = opts?.intervalMs ?? 2000;
+  const timeoutMs = opts?.timeoutMs ?? 5 * 60 * 1000; // 5 min
+  const start = Date.now();
+
+  while (true) {
+    const meta = await getDataset(datasetId);
+
+    if (meta.conversion_status === "ready") {
+      return meta;
+    }
+
+    if (meta.conversion_status === "failed") {
+      throw new Error(
+        `XES conversion failed: ${meta.conversion_error || "Unknown error"}`
+      );
+    }
+
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(
+        `XES conversion timed out after ${Math.round(timeoutMs / 1000)}s`
+      );
+    }
+
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 export async function listSampleDatasets(): Promise<SampleDatasetInfo[]> {
   const res = await apiFetch(`${API_BASE}/sample-datasets`);
   return (await res.json()) as SampleDatasetInfo[];
@@ -200,11 +245,12 @@ export async function downloadSampleDataset(name: string): Promise<Blob> {
   return res.blob();
 }
 
-export async function getDataset(dataset_id: string): Promise<DatasetMeta> {
+export async function importSampleDataset(name: string): Promise<DatasetUploadResponse> {
   const res = await apiFetch(
-    `${API_BASE}/datasets/${encodeURIComponent(dataset_id)}`
+    `${API_BASE}/datasets/sample/${encodeURIComponent(name)}`,
+    { method: "POST" }
   );
-  return (await res.json()) as DatasetMeta;
+  return (await res.json()) as DatasetUploadResponse;
 }
 
 export async function preprocessDataset(

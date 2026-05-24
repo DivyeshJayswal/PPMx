@@ -5,10 +5,13 @@ import uuid
 import json
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from enum import Enum
+import threading
 
 import pandas as pd
 import numpy as np
@@ -16,9 +19,12 @@ import requests
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from collections import deque
 import re
+
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "matplotlib"))
 
 # -----------------------------------------------------------------------------
 # App
@@ -65,20 +71,44 @@ except ImportError:
     PREPROCESSOR_AVAILABLE = False
     print("[WARNING] Preprocessor not available - skipping data cleaning")
 
-STORAGE_DIR = os.path.join(BACKEND_DIR, "storage")
+def _default_storage_dir() -> str:
+    configured = os.getenv("PPM_STORAGE_DIR")
+    if configured:
+        return os.path.abspath(configured)
+
+    if os.getenv("K_SERVICE"):
+        return os.path.join(tempfile.gettempdir(), "ppm-backend-storage")
+
+    return os.path.join(BACKEND_DIR, "storage")
+
+
+STORAGE_DIR = _default_storage_dir()
 UPLOAD_DIR = os.path.join(STORAGE_DIR, "uploads")
 DATASETS_DIR = os.path.join(STORAGE_DIR, "datasets")
 RUNS_DIR = os.path.join(STORAGE_DIR, "runs")
-SAMPLE_DATASETS_CONFIG_PATH = os.path.join(BACKEND_DIR, "sample_datasets.json")
+SAMPLE_DATASETS_CONFIG_PATH = os.path.abspath(
+    os.getenv("SAMPLE_DATASETS_CONFIG_PATH", os.path.join(BACKEND_DIR, "sample_datasets.json"))
+)
 
 for d in (STORAGE_DIR, UPLOAD_DIR, DATASETS_DIR, RUNS_DIR):
     os.makedirs(d, exist_ok=True)
 
-MAX_UPLOAD_MB = 400
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "400"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+MAX_SAMPLE_DOWNLOAD_MB = int(os.getenv("MAX_SAMPLE_DOWNLOAD_MB", "400"))
+MAX_SAMPLE_DOWNLOAD_BYTES = MAX_SAMPLE_DOWNLOAD_MB * 1024 * 1024
 
 # Use the same Python interpreter that runs uvicorn (your backend/.venv)
 PYTHON_EXEC = sys.executable
+
+# P2.2: Process tracking for subprocess timeout management
+# Maps run_id -> {"proc": Popen, "started_at": datetime, "pid": int}
+_active_processes: Dict[str, Dict] = {}
+RUN_TIMEOUT_SECONDS = 7200  # 2 hours max per run
+
+# P2.3: Storage management
+RUN_TTL_HOURS = 72         # Auto-cleanup runs older than 72h
+MAX_STORAGE_MB = 10000     # 10GB disk quota for runs
 
 # -----------------------------------------------------------------------------
 # Small JSON helpers (atomic write)
@@ -102,11 +132,36 @@ def _utc_now() -> str:
 
 def _load_sample_dataset_catalog() -> List[Dict[str, Any]]:
     if not os.path.isfile(SAMPLE_DATASETS_CONFIG_PATH):
-        return []
+        raise HTTPException(
+            status_code=500,
+            detail=f"Sample dataset catalog not found: {SAMPLE_DATASETS_CONFIG_PATH}",
+        )
     data = _read_json(SAMPLE_DATASETS_CONFIG_PATH)
     if not isinstance(data, list):
         raise HTTPException(status_code=500, detail="Invalid sample dataset catalog format.")
     return [item for item in data if isinstance(item, dict)]
+
+
+def _sample_dataset_catalog_status() -> Dict[str, Any]:
+    exists = os.path.isfile(SAMPLE_DATASETS_CONFIG_PATH)
+    status: Dict[str, Any] = {
+        "path": SAMPLE_DATASETS_CONFIG_PATH,
+        "exists": exists,
+        "count": 0,
+        "error": None,
+    }
+    if not exists:
+        status["error"] = "sample_datasets.json is missing from the running container"
+        return status
+    try:
+        data = _read_json(SAMPLE_DATASETS_CONFIG_PATH)
+        if not isinstance(data, list):
+            status["error"] = "catalog JSON root is not a list"
+            return status
+        status["count"] = len([item for item in data if isinstance(item, dict)])
+    except Exception as e:
+        status["error"] = str(e)
+    return status
 
 
 def _is_drive_url_configured(url: Optional[str]) -> bool:
@@ -357,13 +412,15 @@ class DatasetUploadResponse(BaseModel):
     split_config: Optional[Dict[str, float]] = None
     is_preprocessed: bool = False
     preprocessed_at: Optional[str] = None
-    num_events: int
-    num_cases: int
-    columns: List[str]
+    num_events: int = 0
+    num_cases: int = 0
+    columns: List[str] = Field(default_factory=list)
     column_types: Dict[str, str] = Field(default_factory=dict)
-    detected_mapping: Dict[str, str]
+    detected_mapping: Dict[str, str] = Field(default_factory=dict)
     column_diagnostics: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    preview: List[Dict[str, Any]]
+    preview: List[Dict[str, Any]] = Field(default_factory=list)
+    conversion_status: Optional[str] = None  # "converting" | "ready" | "failed"
+    conversion_error: Optional[str] = None
 
 
 class SampleDatasetInfo(BaseModel):
@@ -385,13 +442,15 @@ class DatasetMeta(BaseModel):
     is_preprocessed: bool = False
     preprocessed_at: Optional[str] = None
     preprocessing_options: Optional[Dict[str, bool]] = None
-    num_events: int
-    num_cases: int
-    columns: List[str]
+    num_events: int = 0
+    num_cases: int = 0
+    columns: List[str] = Field(default_factory=list)
     column_types: Dict[str, str] = Field(default_factory=dict)
-    detected_mapping: Dict[str, str]
+    detected_mapping: Dict[str, str] = Field(default_factory=dict)
     column_diagnostics: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     created_at: str
+    conversion_status: Optional[str] = None  # "converting" | "ready" | "failed"
+    conversion_error: Optional[str] = None
 
 
 class ColumnMapping(BaseModel):
@@ -402,18 +461,73 @@ class ColumnMapping(BaseModel):
     resource: Optional[str] = None
 
 
+class ModelType(str, Enum):
+    TRANSFORMER = "transformer"
+    GNN = "gnn"
+
+
+class TaskType(str, Enum):
+    NEXT_ACTIVITY = "next_activity"
+    CUSTOM_ACTIVITY = "custom_activity"
+    EVENT_TIME = "event_time"
+    REMAINING_TIME = "remaining_time"
+    UNIFIED = "unified"
+
+
+class ExplainabilityMethod(str, Enum):
+    SHAP = "shap"
+    LIME = "lime"
+    GRADIENT = "gradient"
+    GRAPH_LIME = "graphlime"
+    ALL = "all"
+
+
 class RunCreateRequest(BaseModel):
     dataset_id: str
-    model_type: str = Field(..., description="transformer | gnn")
-    task: str = Field(..., description="next_activity | custom_activity | event_time | remaining_time | unified (gnn)")
+    model_type: ModelType = Field(..., description="transformer | gnn")
+    task: TaskType = Field(..., description="next_activity | custom_activity | event_time | remaining_time | unified (gnn)")
     config: Dict[str, Any] = Field(default_factory=dict)
     split: Dict[str, float] = Field(default_factory=lambda: {"test_size": 0.2, "val_split": 0.5})
-    explainability: Optional[Any] = None
+    explainability: Optional[ExplainabilityMethod] = None
     target_column: Optional[str] = None
     mapping_mode: Optional[str] = Field(
         default=None, description="auto | manual (optional; defaults to auto)"
     )
     column_mapping: Optional[ColumnMapping] = None
+
+    @field_validator("task")
+    @classmethod
+    def validate_task_for_model(cls, v, info):
+        """Validate task is compatible with model_type."""
+        if 'model_type' in info.data:
+            model_type = info.data['model_type']
+            if model_type == ModelType.TRANSFORMER:
+                allowed_tasks = {TaskType.NEXT_ACTIVITY, TaskType.CUSTOM_ACTIVITY, TaskType.EVENT_TIME, TaskType.REMAINING_TIME}
+                if v not in allowed_tasks:
+                    raise ValueError(f"Task '{v}' not supported for transformer model. Allowed: {[t.value for t in allowed_tasks]}")
+            elif model_type == ModelType.GNN:
+                allowed_tasks = {TaskType.NEXT_ACTIVITY, TaskType.EVENT_TIME, TaskType.REMAINING_TIME, TaskType.UNIFIED}
+                if v not in allowed_tasks:
+                    raise ValueError(f"Task '{v}' not supported for GNN model. Allowed: {[t.value for t in allowed_tasks]}")
+        return v
+
+    @field_validator("explainability")
+    @classmethod
+    def validate_explainability_for_model(cls, v, info):
+        """Validate explainability method is compatible with model_type."""
+        if v is None:
+            return v
+        if 'model_type' in info.data:
+            model_type = info.data['model_type']
+            if model_type == ModelType.TRANSFORMER:
+                allowed_methods = {ExplainabilityMethod.SHAP, ExplainabilityMethod.LIME, ExplainabilityMethod.GRADIENT, ExplainabilityMethod.ALL}
+                if v not in allowed_methods:
+                    raise ValueError(f"Explainability '{v}' not supported for transformer. Allowed: {[m.value for m in allowed_methods]}")
+            elif model_type == ModelType.GNN:
+                allowed_methods = {ExplainabilityMethod.GRAPH_LIME, ExplainabilityMethod.GRADIENT, ExplainabilityMethod.ALL}
+                if v not in allowed_methods:
+                    raise ValueError(f"Explainability '{v}' not supported for GNN. Allowed: {[m.value for m in allowed_methods]}")
+        return v
 
 
 class RunCreateResponse(BaseModel):
@@ -596,8 +710,8 @@ def _load_run_status(run_id: str) -> Dict[str, Any]:
     if not os.path.exists(status_path):
         raise HTTPException(status_code=404, detail="Run not found")
     return _read_json(status_path)
-
-
+ 
+ 
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
@@ -619,8 +733,16 @@ def version():
         "service": "ppm-backend",
         "revision": os.getenv("K_REVISION"),
         "configuration": os.getenv("K_CONFIGURATION"),
+        "build_sha": os.getenv("BUILD_SHA"),
         "max_upload_mb": MAX_UPLOAD_MB,
+        "max_sample_download_mb": MAX_SAMPLE_DOWNLOAD_MB,
         "docs_url": "/api/docs",
+        "runtime": {
+            "storage_dir": STORAGE_DIR,
+            "storage_dir_exists": os.path.isdir(STORAGE_DIR),
+            "storage_dir_writable": os.access(STORAGE_DIR, os.W_OK),
+            "sample_datasets": _sample_dataset_catalog_status(),
+        },
         "deps": {
             "torch": _module_version("torch"),
             "torch_geometric": _module_version("torch_geometric"),
@@ -632,11 +754,164 @@ def version():
     }
 
 
+def _convert_xes_background(dataset_id: str, raw_path: str, stored_path: str, ds_dir: str):
+    """Background thread: convert XES→CSV and update dataset meta."""
+    try:
+        from conv_and_viz.xes_to_csv import convert_xes_to_csv
+        csv_path, df, _ = convert_xes_to_csv(raw_path, ds_dir)
+
+        # Normalize to dataset.csv
+        if os.path.abspath(csv_path) != os.path.abspath(stored_path):
+            shutil.copyfile(csv_path, stored_path)
+
+        df = pd.read_csv(stored_path)
+        num_events = int(len(df))
+        detected_mapping = _detect_original_column_mapping(df)
+        case_col = detected_mapping.get("case_id")
+        num_cases = int(df[case_col].nunique()) if case_col else 0
+        preview_rows = df.head(20).to_dict(orient="records")
+        column_types = _infer_column_types(df)
+        column_diagnostics = _compute_column_diagnostics(df)
+
+        # Load existing meta and update
+        meta_path = _dataset_meta_path(dataset_id)
+        existing = json.loads(open(meta_path, "r").read())
+        existing.update({
+            "stored_path": stored_path,
+            "num_events": num_events,
+            "num_cases": num_cases,
+            "columns": list(df.columns),
+            "column_types": column_types,
+            "detected_mapping": detected_mapping,
+            "column_diagnostics": column_diagnostics,
+            "conversion_status": "ready",
+            "conversion_error": None,
+        })
+        # Write preview to a separate file (too large for meta in some cases)
+        _write_json(os.path.join(ds_dir, "preview.json"), preview_rows)
+        _write_json(meta_path, existing)
+
+    except Exception as e:
+        meta_path = _dataset_meta_path(dataset_id)
+        try:
+            existing = json.loads(open(meta_path, "r").read())
+            existing["conversion_status"] = "failed"
+            existing["conversion_error"] = str(e)
+            _write_json(meta_path, existing)
+        except Exception:
+            pass
+
+
+def _finalize_saved_dataset(
+    *,
+    dataset_id: str,
+    ext: str,
+    stored_path: str,
+    raw_path: str,
+    ds_dir: str,
+    preprocessed: bool,
+) -> DatasetUploadResponse:
+    if ext == "xes":
+        try:
+            from conv_and_viz.xes_to_csv import convert_xes_to_csv  # noqa: F401
+        except ImportError:
+            shutil.rmtree(ds_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=500,
+                detail="XES support requires pm4py; install backend dependencies.",
+            )
+
+        meta = DatasetMeta(
+            dataset_id=dataset_id,
+            stored_path=stored_path,
+            raw_path=raw_path,
+            created_at=_utc_now(),
+            conversion_status="converting",
+        )
+        _write_json(_dataset_meta_path(dataset_id), meta.model_dump())
+
+        t = threading.Thread(
+            target=_convert_xes_background,
+            args=(dataset_id, raw_path, stored_path, ds_dir),
+            daemon=True,
+        )
+        t.start()
+
+        return DatasetUploadResponse(
+            dataset_id=dataset_id,
+            stored_path=stored_path,
+            raw_path=raw_path,
+            conversion_status="converting",
+        )
+
+    try:
+        df = pd.read_csv(stored_path)
+    except Exception as e:
+        shutil.rmtree(ds_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Failed to parse dataset: {str(e)}")
+
+    num_events = int(len(df))
+    detected_mapping = _detect_original_column_mapping(df)
+    case_col = detected_mapping.get("case_id")
+    num_cases = int(df[case_col].nunique()) if case_col else 0
+
+    preview_rows = df.head(20).to_dict(orient="records")
+    column_types = _infer_column_types(df)
+    column_diagnostics = _compute_column_diagnostics(df)
+
+    preprocessed_at = _utc_now() if preprocessed else None
+
+    meta = DatasetMeta(
+        dataset_id=dataset_id,
+        stored_path=stored_path,
+        raw_path=raw_path,
+        preprocessed_path=stored_path if preprocessed else None,
+        split_dataset_path=None,
+        split_paths=None,
+        split_source=None,
+        split_config=None,
+        is_preprocessed=preprocessed,
+        preprocessed_at=preprocessed_at,
+        preprocessing_options=None,
+        num_events=num_events,
+        num_cases=num_cases,
+        columns=list(df.columns),
+        column_types=column_types,
+        detected_mapping=detected_mapping,
+        column_diagnostics=column_diagnostics,
+        created_at=_utc_now(),
+        conversion_status="ready",
+    )
+    _write_json(_dataset_meta_path(dataset_id), meta.model_dump())
+
+    return DatasetUploadResponse(
+        dataset_id=dataset_id,
+        stored_path=stored_path,
+        raw_path=raw_path,
+        preprocessed_path=meta.preprocessed_path,
+        split_dataset_path=None,
+        split_paths=None,
+        split_source=None,
+        split_config=None,
+        is_preprocessed=meta.is_preprocessed,
+        preprocessed_at=preprocessed_at,
+        num_events=num_events,
+        num_cases=num_cases,
+        columns=list(df.columns),
+        column_types=column_types,
+        detected_mapping=detected_mapping,
+        column_diagnostics=column_diagnostics,
+        preview=preview_rows,
+        conversion_status="ready",
+    )
+
+
 @app.post("/datasets/upload", response_model=DatasetUploadResponse)
 async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = False):
     """
-    Upload a CSV or XES dataset. Stores it on disk, converts XES→CSV when needed,
-    parses it, detects column mapping, and writes metadata to backend/storage/datasets/<dataset_id>/meta.json
+    Upload a CSV or XES dataset. CSV is parsed synchronously.
+    XES files are saved to disk and converted in a background thread.
+    Poll GET /datasets/{dataset_id} until conversion_status == "ready".
     """
     filename = file.filename or "dataset.csv"
     ext = _detect_upload_format(filename)
@@ -674,92 +949,13 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
         shutil.rmtree(ds_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-    # Parse / convert
-    try:
-        if ext == "csv":
-            df = pd.read_csv(stored_path)
-        else:
-            try:
-                from conv_and_viz.xes_to_csv import convert_xes_to_csv
-            except ImportError:
-                shutil.rmtree(ds_dir, ignore_errors=True)
-                raise HTTPException(
-                    status_code=500,
-                    detail="XES support requires pm4py; install backend dependencies.",
-                )
-
-            try:
-                csv_path, df, _ = convert_xes_to_csv(raw_path, ds_dir)
-            except Exception as e:
-                shutil.rmtree(ds_dir, ignore_errors=True)
-                raise HTTPException(status_code=400, detail=f"Failed to convert XES: {str(e)}")
-
-            # Normalize to dataset.csv for downstream code
-            if os.path.abspath(csv_path) != os.path.abspath(stored_path):
-                shutil.copyfile(csv_path, stored_path)
-    except HTTPException:
-        raise
-    except Exception as e:
-        shutil.rmtree(ds_dir, ignore_errors=True)
-        raise HTTPException(status_code=400, detail=f"Failed to parse dataset: {str(e)}")
-
-    # Read raw CSV (no preprocessing on upload)
-    df = pd.read_csv(stored_path)
-
-    num_events = int(len(df))
-    detected_mapping = _detect_original_column_mapping(df)
-    case_col = detected_mapping.get("case_id")
-    num_cases = int(df[case_col].nunique()) if case_col else 0
-
-    preview_rows = df.head(20).to_dict(orient="records")
-    column_types = _infer_column_types(df)
-    column_diagnostics = _compute_column_diagnostics(df)
-
-    preprocessed_at = _utc_now() if preprocessed else None
-
-    meta = DatasetMeta(
+    return _finalize_saved_dataset(
         dataset_id=dataset_id,
+        ext=ext,
         stored_path=stored_path,
         raw_path=raw_path,
-        preprocessed_path=None,
-        split_dataset_path=None,
-        split_paths=None,
-        split_source=None,
-        split_config=None,
-        is_preprocessed=False,
-        preprocessed_at=preprocessed_at,
-        preprocessing_options=None,
-        num_events=num_events,
-        num_cases=num_cases,
-        columns=list(df.columns),
-        column_types=column_types,
-        detected_mapping=detected_mapping,
-        column_diagnostics=column_diagnostics,
-        created_at=_utc_now(),
-    )
-    if preprocessed:
-        meta.preprocessed_path = stored_path
-        meta.is_preprocessed = True
-    _write_json(_dataset_meta_path(dataset_id), meta.model_dump())
-
-    return DatasetUploadResponse(
-        dataset_id=dataset_id,
-        stored_path=stored_path,
-        raw_path=stored_path,
-        preprocessed_path=meta.preprocessed_path,
-        split_dataset_path=None,
-        split_paths=None,
-        split_source=None,
-        split_config=None,
-        is_preprocessed=meta.is_preprocessed,
-        preprocessed_at=preprocessed_at,
-        num_events=num_events,
-        num_cases=num_cases,
-        columns=list(df.columns),
-        column_types=column_types,
-        detected_mapping=detected_mapping,
-        column_diagnostics=column_diagnostics,
-        preview=preview_rows,
+        ds_dir=ds_dir,
+        preprocessed=preprocessed,
     )
 
 
@@ -788,6 +984,58 @@ def download_sample_dataset(sample_name: str):
             upstream.close()
 
     return StreamingResponse(iter_stream(), media_type=media_type, headers=headers)
+
+
+@app.post("/datasets/sample/{sample_name}", response_model=DatasetUploadResponse)
+def import_sample_dataset(sample_name: str):
+    item = _get_sample_dataset_entry(sample_name)
+    fmt = str(item.get("format", "")).strip().lower()
+    if fmt not in {"csv", "xes"}:
+        raise HTTPException(status_code=500, detail="Invalid sample dataset format.")
+
+    drive_url = item.get("drive_url")
+    if not _is_drive_url_configured(drive_url):
+        raise HTTPException(status_code=400, detail="Google Drive link not configured for this sample dataset.")
+
+    dataset_id = str(uuid.uuid4())
+    ds_dir = _dataset_dir(dataset_id)
+    os.makedirs(ds_dir, exist_ok=True)
+
+    stored_path = _dataset_file_path(dataset_id)
+    raw_path = stored_path if fmt == "csv" else os.path.join(ds_dir, "dataset.xes")
+
+    upstream = _google_drive_download_response(str(drive_url))
+    size = 0
+    try:
+        with open(raw_path, "wb") as out:
+            for chunk in upstream.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > MAX_SAMPLE_DOWNLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Sample dataset too large. Max allowed is {MAX_SAMPLE_DOWNLOAD_MB} MB.",
+                    )
+                out.write(chunk)
+    except Exception:
+        shutil.rmtree(ds_dir, ignore_errors=True)
+        raise
+    finally:
+        upstream.close()
+
+    if size == 0:
+        shutil.rmtree(ds_dir, ignore_errors=True)
+        raise HTTPException(status_code=502, detail="Downloaded sample dataset is empty.")
+
+    return _finalize_saved_dataset(
+        dataset_id=dataset_id,
+        ext=fmt,
+        stored_path=stored_path,
+        raw_path=raw_path,
+        ds_dir=ds_dir,
+        preprocessed=False,
+    )
 
 
 @app.post("/datasets/{dataset_id}/preprocess", response_model=DatasetUploadResponse)
@@ -909,6 +1157,14 @@ def _compute_split_frames(df: pd.DataFrame, cfg: SplitConfig) -> Tuple[pd.DataFr
         val_df = df.iloc[val_idx].copy()
         test_df = df.iloc[test_idx].copy()
 
+    # P1.2: Validate splits are non-empty
+    if train_df.empty:
+        raise ValueError("Train split is empty. Dataset may be too small or split configuration invalid.")
+    if val_df.empty:
+        raise ValueError("Validation split is empty. Dataset may be too small or split configuration invalid.")
+    if test_df.empty:
+        raise ValueError("Test split is empty. Dataset may be too small or split configuration invalid.")
+
     return train_df, val_df, test_df
 
 
@@ -953,7 +1209,10 @@ def generate_splits(dataset_id: str, cfg: SplitConfig):
     if df.empty:
         raise HTTPException(status_code=400, detail="Dataset is empty; cannot generate splits.")
 
-    train_df, val_df, test_df = _compute_split_frames(df, cfg)
+    try:
+        train_df, val_df, test_df = _compute_split_frames(df, cfg)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Split generation failed: {str(e)}")
     split_dataset_path, split_paths = _write_split_files(df, _dataset_dir(dataset_id), train_df, val_df, test_df)
 
     num_events = int(len(df))
@@ -1191,6 +1450,143 @@ def get_dataset(dataset_id: str):
     return _load_dataset_meta(dataset_id)
 
 
+def _get_dir_size_mb(path: str) -> float:
+    """Get directory size in MB."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total / (1024 * 1024)
+
+
+def _cleanup_old_runs():
+    """P2.3: Remove completed runs older than TTL_HOURS to free disk space."""
+    if not os.path.isdir(RUNS_DIR):
+        return 0
+
+    cutoff = datetime.utcnow()
+    removed = 0
+
+    for run_id in os.listdir(RUNS_DIR):
+        run_dir = os.path.join(RUNS_DIR, run_id)
+        if not os.path.isdir(run_dir):
+            continue
+
+        status_path = os.path.join(run_dir, "status.json")
+        if not os.path.exists(status_path):
+            continue
+
+        try:
+            status = json.loads(open(status_path, "r").read())
+        except Exception:
+            continue
+
+        # Only clean completed/failed runs
+        if status.get("status") not in ("succeeded", "failed"):
+            continue
+
+        finished_at = status.get("finished_at")
+        if not finished_at:
+            continue
+
+        try:
+            finished_dt = datetime.fromisoformat(finished_at.rstrip("Z"))
+        except Exception:
+            continue
+
+        age_hours = (cutoff - finished_dt).total_seconds() / 3600
+        if age_hours > RUN_TTL_HOURS:
+            try:
+                shutil.rmtree(run_dir)
+                removed += 1
+            except Exception:
+                pass
+
+    return removed
+
+
+def _enforce_disk_quota():
+    """P2.3: If runs exceed disk quota, remove oldest completed runs."""
+    if not os.path.isdir(RUNS_DIR):
+        return
+
+    current_mb = _get_dir_size_mb(RUNS_DIR)
+    if current_mb <= MAX_STORAGE_MB:
+        return
+
+    # Collect completed runs sorted by finish time (oldest first)
+    run_ages = []
+    for run_id in os.listdir(RUNS_DIR):
+        run_dir = os.path.join(RUNS_DIR, run_id)
+        status_path = os.path.join(run_dir, "status.json")
+        if not os.path.isdir(run_dir) or not os.path.exists(status_path):
+            continue
+        try:
+            status = json.loads(open(status_path, "r").read())
+            if status.get("status") not in ("succeeded", "failed"):
+                continue
+            finished_at = status.get("finished_at", "")
+            run_ages.append((finished_at, run_dir))
+        except Exception:
+            continue
+
+    run_ages.sort(key=lambda x: x[0])  # oldest first
+
+    for _, run_dir in run_ages:
+        if _get_dir_size_mb(RUNS_DIR) <= MAX_STORAGE_MB:
+            break
+        try:
+            shutil.rmtree(run_dir)
+        except Exception:
+            pass
+
+
+def _cleanup_stale_processes():
+    """P2.2: Kill processes that exceed timeout and clean up finished ones."""
+    now = datetime.utcnow()
+    finished_ids = []
+
+    for run_id, info in _active_processes.items():
+        proc = info["proc"]
+        started_at = info["started_at"]
+
+        # Check if process already finished
+        if proc.poll() is not None:
+            finished_ids.append(run_id)
+            continue
+
+        # Kill if exceeded timeout
+        elapsed = (now - started_at).total_seconds()
+        if elapsed > RUN_TIMEOUT_SECONDS:
+            try:
+                proc.kill()
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+
+            # Mark as failed in status
+            rdir = _run_dir(run_id)
+            status_path = os.path.join(rdir, "status.json")
+            if os.path.exists(status_path):
+                try:
+                    _write_json(status_path, {
+                        "run_id": run_id,
+                        "status": "failed",
+                        "error": f"Process killed: exceeded {RUN_TIMEOUT_SECONDS}s timeout",
+                        "updated_at": _utc_now(),
+                    })
+                except Exception:
+                    pass
+            finished_ids.append(run_id)
+
+    for rid in finished_ids:
+        _active_processes.pop(rid, None)
+
+
 @app.post("/runs", response_model=RunCreateResponse)
 def create_run(req: RunCreateRequest):
     """
@@ -1205,15 +1601,18 @@ def create_run(req: RunCreateRequest):
     os.makedirs(rdir, exist_ok=True)
     os.makedirs(_run_artifacts_dir(run_id), exist_ok=True)
 
+    # Pass explainability as string — the explainability modules handle "all" internally
+    explainability_value = req.explainability.value if req.explainability else None
+
     # Write request.json for the runner
     request_obj = {
         "run_id": run_id,
         "dataset_id": req.dataset_id,
-        "model_type": req.model_type,
-        "task": req.task,
+        "model_type": req.model_type.value,
+        "task": req.task.value,
         "config": req.config,
         "split": req.split,
-        "explainability": req.explainability,
+        "explainability": explainability_value,
         "target_column": req.target_column,
         "mapping_mode": req.mapping_mode,
         "column_mapping": req.column_mapping.model_dump() if req.column_mapping else None,
@@ -1230,6 +1629,12 @@ def create_run(req: RunCreateRequest):
     }
     _write_json(_run_status_path(run_id), status_obj)
 
+    # P2.2: Clean up stale/timed-out processes before spawning new one
+    _cleanup_stale_processes()
+    # P2.3: Enforce storage limits before spawning
+    _cleanup_old_runs()
+    _enforce_disk_quota()
+
     # Spawn subprocess job (logs to logs.txt)
     log_path = os.path.join(rdir, "logs.txt")
     with open(log_path, "a", encoding="utf-8") as log:
@@ -1241,6 +1646,13 @@ def create_run(req: RunCreateRequest):
             cwd=REPO_ROOT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
+
+    # P2.2: Track process for timeout management
+    _active_processes[run_id] = {
+        "proc": proc,
+        "started_at": datetime.utcnow(),
+        "pid": proc.pid,
+    }
 
     # Save pid
     status_obj["pid"] = proc.pid
@@ -1357,3 +1769,20 @@ def download_artifacts_zip(run_id: str):
                 zf.write(full, arcname=rel)
 
     return FileResponse(zip_path, filename=f"run_{run_id}_artifacts.zip")
+
+
+@app.post("/admin/cleanup")
+def admin_cleanup():
+    """P2.3: Manual storage cleanup endpoint."""
+    removed_runs = _cleanup_old_runs()
+    _enforce_disk_quota()
+    _cleanup_stale_processes()
+
+    storage_mb = _get_dir_size_mb(RUNS_DIR) if os.path.isdir(RUNS_DIR) else 0
+    return {
+        "removed_runs": removed_runs,
+        "active_processes": len(_active_processes),
+        "storage_mb": round(storage_mb, 2),
+        "quota_mb": MAX_STORAGE_MB,
+        "ttl_hours": RUN_TTL_HOURS,
+    }
