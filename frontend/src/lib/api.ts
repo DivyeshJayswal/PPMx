@@ -117,7 +117,7 @@ export type PreprocessOptions = {
   check_millisecond_order?: boolean;
   impute_categorical?: boolean;
   impute_numeric_neighbors?: boolean;
-  drop_missing_timestamps?: boolean;
+  drop_cases_with_missing_timestamps?: boolean;
   fill_remaining_missing?: boolean;
   remove_duplicates?: boolean;
 };
