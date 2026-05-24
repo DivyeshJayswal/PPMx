@@ -194,6 +194,39 @@ class PipelineUnitTests(unittest.TestCase):
             self._record(name, False, str(exc))
             raise
 
+    def test_preprocess_event_log_drops_cases_with_missing_timestamps(self):
+        name = "preprocess_event_log_drops_cases_with_missing_timestamps"
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                input_path = os.path.join(tmpdir, "input.csv")
+                output_path = os.path.join(tmpdir, "output.csv")
+                df = pd.DataFrame({
+                    "case_id": ["1", "1", "2", "2"],
+                    "activity": ["A", "B", "C", "D"],
+                    "timestamp": [
+                        "2024-01-01 00:00:00",
+                        None,
+                        "2024-01-02 00:00:00",
+                        "2024-01-02 00:05:00",
+                    ],
+                })
+                df.to_csv(input_path, index=False)
+                out_df = preprocessor_csv.preprocess_event_log(
+                    input_path,
+                    output_csv_path=output_path,
+                    options={
+                        "drop_cases_with_missing_timestamps": True,
+                        "fill_remaining_missing": False,
+                    },
+                )
+                self.assertTrue(os.path.exists(output_path))
+                self.assertEqual(sorted(out_df["case_id"].astype(str).unique().tolist()), ["2"])
+                self.assertEqual(len(out_df), 2)
+            self._record(name, True)
+        except Exception as exc:
+            self._record(name, False, str(exc))
+            raise
+
     def test_detect_column_type(self):
         name = "detect_column_type"
         try:
