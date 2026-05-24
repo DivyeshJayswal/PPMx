@@ -220,7 +220,7 @@ class PipelineUnitTests(unittest.TestCase):
                     },
                 )
                 self.assertTrue(os.path.exists(output_path))
-                self.assertEqual(sorted(out_df["case_id"].unique().tolist()), ["2"])
+                self.assertEqual(sorted(out_df["case_id"].astype(str).unique().tolist()), ["2"])
                 self.assertEqual(len(out_df), 2)
             self._record(name, True)
         except Exception as exc:
