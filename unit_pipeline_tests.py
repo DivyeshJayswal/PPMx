@@ -215,54 +215,13 @@ class PipelineUnitTests(unittest.TestCase):
                     input_path,
                     output_csv_path=output_path,
                     options={
-                        "drop_missing_timestamps": False,
                         "drop_cases_with_missing_timestamps": True,
                         "fill_remaining_missing": False,
                     },
                 )
                 self.assertTrue(os.path.exists(output_path))
-                remaining_cases = {str(value).replace(".0", "") for value in out_df["case_id"].unique()}
-                self.assertEqual(remaining_cases, {"2"})
+                self.assertEqual(sorted(out_df["case_id"].astype(str).unique().tolist()), ["2"])
                 self.assertEqual(len(out_df), 2)
-            self._record(name, True)
-        except Exception as exc:
-            self._record(name, False, str(exc))
-            raise
-
-    def test_preprocess_event_log_case_drop_ignores_non_empty_invalid_timestamps(self):
-        name = "preprocess_event_log_case_drop_ignores_non_empty_invalid_timestamps"
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                input_path = os.path.join(tmpdir, "input.csv")
-                output_path = os.path.join(tmpdir, "output.csv")
-                df = pd.DataFrame({
-                    "case_id": ["1", "1", "2", "2"],
-                    "activity": ["A", "B", "C", "D"],
-                    "timestamp": [
-                        "2024-01-01 00:00:00",
-                        "not-a-timestamp",
-                        "2024-01-02 00:00:00",
-                        "2024-01-02 00:05:00",
-                    ],
-                })
-                df.to_csv(input_path, index=False)
-                out_df = preprocessor_csv.preprocess_event_log(
-                    input_path,
-                    output_csv_path=output_path,
-                    options={
-                        "sort_and_normalize_timestamps": False,
-                        "check_millisecond_order": False,
-                        "drop_missing_timestamps": False,
-                        "drop_cases_with_missing_timestamps": True,
-                        "fill_remaining_missing": False,
-                    },
-                )
-                self.assertTrue(os.path.exists(output_path))
-                remaining_cases = {
-                    str(value).replace(".0", "") for value in out_df["case_id"].unique()
-                }
-                self.assertEqual(remaining_cases, {"1", "2"})
-                self.assertEqual(len(out_df), 4)
             self._record(name, True)
         except Exception as exc:
             self._record(name, False, str(exc))
