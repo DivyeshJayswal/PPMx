@@ -3,13 +3,6 @@ import numpy as np
 import os
 from conv_and_viz.xes_to_csv import load_event_log, log_to_dataframe_preserve_all
 
-try:
-    import pm4py
-    from pm4py.objects.conversion.log import converter as log_converter
-    PM4PY_AVAILABLE = True
-except ImportError:
-    PM4PY_AVAILABLE = False
-
 
 def detect_column_type(series):
     """Detect whether a column is categorical, numerical, or datetime."""
@@ -49,8 +42,6 @@ def preprocess_event_log(input_path, output_csv_path="preprocessed_log.csv", opt
 
     lower_input_path = input_path.lower()
     if lower_input_path.endswith(".xes") or lower_input_path.endswith(".xes.gz"):
-        if not PM4PY_AVAILABLE:
-            raise ImportError("PM4Py is required to process XES files. Install with: pip install pm4py")
         log = load_event_log(input_path)
         df = log_to_dataframe_preserve_all(log)
     else:

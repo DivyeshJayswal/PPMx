@@ -1,14 +1,40 @@
 import os
 import pandas as pd
-from pm4py.objects.log.importer.xes import importer as xes_importer
-from pm4py.objects.log.importer.xes.variants import iterparse as xes_iterparse
-from pm4py.objects.conversion.log import converter as log_converter
 
 from conv_and_viz.xes_utils import normalized_xes_path
 
 
+def _prepare_pm4py_import() -> None:
+    """
+    PM4Py imports psutil during module initialization and assumes os.getppid()
+    maps to a valid process. In Cloud Run that can be PID 0, which makes
+    psutil raise NoSuchProcess before our app can handle the request.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return
+
+    if getattr(psutil, "_ppm_pid_zero_patch", False):
+        return
+
+    original_process = psutil.Process
+
+    def process_with_pid_zero_guard(pid=None):
+        if pid == 0:
+            pid = os.getpid()
+        return original_process(pid)
+
+    psutil.Process = process_with_pid_zero_guard
+    psutil._ppm_pid_zero_patch = True
+
+
 def load_event_log(xes_path: str):
     """Load an XES event log file."""
+    _prepare_pm4py_import()
+    from pm4py.objects.log.importer.xes import importer as xes_importer
+    from pm4py.objects.log.importer.xes.variants import iterparse as xes_iterparse
+
     with normalized_xes_path(xes_path) as import_path:
         parameters = {
             xes_iterparse.Parameters.SHOW_PROGRESS_BAR: False,
@@ -18,6 +44,9 @@ def load_event_log(xes_path: str):
 
 def log_to_dataframe_preserve_all(event_log):
     """Convert event log to DataFrame using PM4Py's built-in converter to preserve all attributes."""
+    _prepare_pm4py_import()
+    from pm4py.objects.conversion.log import converter as log_converter
+
     df = log_converter.apply(event_log, variant=log_converter.Variants.TO_DATA_FRAME)
     return df
 

@@ -46,6 +46,31 @@ def list_artifacts(artifacts_dir: str) -> list[str]:
     return out
 
 
+def artifact_bucket_name() -> str | None:
+    return os.getenv("ARTIFACT_BUCKET") or os.getenv("UPLOAD_BUCKET")
+
+
+def upload_run_dir_to_gcs(run_dir: str, run_id: str) -> None:
+    bucket_name = artifact_bucket_name()
+    if not bucket_name:
+        return
+
+    try:
+        from google.cloud import storage
+    except Exception as e:
+        raise RuntimeError(f"google-cloud-storage is required for artifact upload: {e}") from e
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    prefix = f"runs/{run_id}/"
+
+    for root, _, files in os.walk(run_dir):
+        for filename in files:
+            full_path = os.path.join(root, filename)
+            rel_path = os.path.relpath(full_path, run_dir).replace(os.sep, "/")
+            bucket.blob(prefix + rel_path).upload_from_filename(full_path)
+
+
 def normalize_explainability(value: Any) -> Any:
     # Frontend/Swagger often sends "none"
     if value is None:
@@ -294,6 +319,10 @@ def main():
         })
 
         patch_status(status_path, status="succeeded", finished_at=utc_now(), error=None)
+        try:
+            upload_run_dir_to_gcs(run_dir, run_id)
+        except Exception as upload_error:
+            patch_status(status_path, artifact_upload_error=str(upload_error))
 
     except Exception as e:
         tb = traceback.format_exc()
@@ -313,6 +342,10 @@ def main():
             "finished_at": utc_now(),
         })
         patch_status(status_path, status="failed", finished_at=utc_now(), error=str(e))
+        try:
+            upload_run_dir_to_gcs(run_dir, run_id)
+        except Exception:
+            pass
         raise
 
 

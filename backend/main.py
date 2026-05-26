@@ -5,7 +5,10 @@ import uuid
 import json
 import shutil
 import subprocess
+import tempfile
 import zipfile
+import io
+import mimetypes
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,10 +18,13 @@ import numpy as np
 import requests
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from collections import deque
 import re
+
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "matplotlib"))
 
 # -----------------------------------------------------------------------------
 # App
@@ -65,7 +71,18 @@ except ImportError:
     PREPROCESSOR_AVAILABLE = False
     print("[WARNING] Preprocessor not available - skipping data cleaning")
 
-STORAGE_DIR = os.path.join(BACKEND_DIR, "storage")
+def _default_storage_dir() -> str:
+    configured = os.getenv("PPM_STORAGE_DIR")
+    if configured:
+        return os.path.abspath(configured)
+
+    if os.getenv("K_SERVICE"):
+        return os.path.join(tempfile.gettempdir(), "ppm-backend-storage")
+
+    return os.path.join(BACKEND_DIR, "storage")
+
+
+STORAGE_DIR = _default_storage_dir()
 UPLOAD_DIR = os.path.join(STORAGE_DIR, "uploads")
 DATASETS_DIR = os.path.join(STORAGE_DIR, "datasets")
 RUNS_DIR = os.path.join(STORAGE_DIR, "runs")
@@ -594,8 +611,108 @@ def _run_artifacts_dir(run_id: str) -> str:
 def _load_run_status(run_id: str) -> Dict[str, Any]:
     status_path = _run_status_path(run_id)
     if not os.path.exists(status_path):
+        gcs_status = _read_gcs_run_json(run_id, "status.json")
+        if gcs_status is not None:
+            return gcs_status
         raise HTTPException(status_code=404, detail="Run not found")
     return _read_json(status_path)
+
+
+def _artifact_bucket_name() -> Optional[str]:
+    return os.getenv("ARTIFACT_BUCKET") or os.getenv("UPLOAD_BUCKET")
+
+
+def _gcs_bucket():
+    bucket_name = _artifact_bucket_name()
+    if not bucket_name:
+        return None
+    try:
+        from google.cloud import storage
+    except Exception:
+        return None
+    return storage.Client().bucket(bucket_name)
+
+
+def _gcs_run_prefix(run_id: str) -> str:
+    return f"runs/{run_id}/"
+
+
+def _read_gcs_run_json(run_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
+    bucket = _gcs_bucket()
+    if bucket is None:
+        return None
+    blob = bucket.blob(_gcs_run_prefix(run_id) + rel_path)
+    if not blob.exists():
+        return None
+    return json.loads(blob.download_as_text(encoding="utf-8"))
+
+
+def _list_gcs_artifacts(run_id: str) -> Optional[List[str]]:
+    bucket = _gcs_bucket()
+    if bucket is None:
+        return None
+    artifact_prefix = _gcs_run_prefix(run_id) + "artifacts/"
+    blobs = list(bucket.list_blobs(prefix=artifact_prefix))
+    if not blobs:
+        status_blob = bucket.blob(_gcs_run_prefix(run_id) + "status.json")
+        if not status_blob.exists():
+            return None
+        return []
+    artifacts = [
+        blob.name[len(artifact_prefix):]
+        for blob in blobs
+        if blob.name != artifact_prefix and blob.name[len(artifact_prefix):]
+    ]
+    artifacts.sort()
+    return artifacts
+
+
+def _download_gcs_run_file(run_id: str, rel_path: str, filename: Optional[str] = None) -> Response:
+    bucket = _gcs_bucket()
+    if bucket is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    blob = bucket.blob(_gcs_run_prefix(run_id) + rel_path)
+    if not blob.exists():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    data = blob.download_as_bytes()
+    media_type = mimetypes.guess_type(filename or rel_path)[0] or "application/octet-stream"
+    headers = {}
+    if filename:
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return Response(content=data, media_type=media_type, headers=headers)
+
+
+def _download_gcs_text_file(run_id: str, rel_path: str) -> Optional[str]:
+    bucket = _gcs_bucket()
+    if bucket is None:
+        return None
+    blob = bucket.blob(_gcs_run_prefix(run_id) + rel_path)
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _download_gcs_artifacts_zip(run_id: str) -> Response:
+    bucket = _gcs_bucket()
+    artifacts = _list_gcs_artifacts(run_id)
+    if bucket is None or artifacts is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if not artifacts:
+        raise HTTPException(status_code=404, detail="Artifacts not found")
+
+    artifact_prefix = _gcs_run_prefix(run_id) + "artifacts/"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel_path in artifacts:
+            blob = bucket.blob(artifact_prefix + rel_path)
+            if blob.exists():
+                zf.writestr(rel_path, blob.download_as_bytes())
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="run_{run_id}_artifacts.zip"'},
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1267,7 +1384,16 @@ def get_run_logs(run_id: str, tail: int = 50):
     rdir = _run_dir(run_id)
     log_path = os.path.join(rdir, "logs.txt")
     if not os.path.exists(log_path):
-        raise HTTPException(status_code=404, detail="Run logs not found")
+        logs = _download_gcs_text_file(run_id, "logs.txt")
+        if logs is None:
+            raise HTTPException(status_code=404, detail="Run logs not found")
+        tail = max(1, min(int(tail), 500))
+        ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+        lines = [
+            ansi_re.sub("", line).replace("\r", "").rstrip("\n")
+            for line in logs.splitlines()
+        ][-tail:]
+        return {"run_id": run_id, "lines": lines}
 
     tail = max(1, min(int(tail), 500))
     ansi_re = re.compile(r"\x1b\[[0-9;]*m")
@@ -1288,7 +1414,7 @@ def download_run_logs(run_id: str):
     rdir = _run_dir(run_id)
     log_path = os.path.join(rdir, "logs.txt")
     if not os.path.exists(log_path):
-        raise HTTPException(status_code=404, detail="Run logs not found")
+        return _download_gcs_run_file(run_id, "logs.txt", filename=f"run_{run_id}_logs.txt")
 
     return FileResponse(log_path, filename=f"run_{run_id}_logs.txt", media_type="text/plain")
 
@@ -1300,7 +1426,10 @@ def list_artifacts(run_id: str):
     """
     rdir = _run_dir(run_id)
     if not os.path.exists(rdir):
-        raise HTTPException(status_code=404, detail="Run not found")
+        artifacts = _list_gcs_artifacts(run_id)
+        if artifacts is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return {"run_id": run_id, "artifacts": artifacts}
 
     artifacts_dir = _run_artifacts_dir(run_id)
     if not os.path.exists(artifacts_dir):
@@ -1330,7 +1459,7 @@ def get_artifact(run_id: str, artifact_path: str):
         raise HTTPException(status_code=400, detail="Invalid artifact path")
 
     if not os.path.exists(full):
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        return _download_gcs_run_file(run_id, f"artifacts/{artifact_path}")
 
     return FileResponse(full)
 
@@ -1342,7 +1471,7 @@ def download_artifacts_zip(run_id: str):
     """
     rdir = _run_dir(run_id)
     if not os.path.exists(rdir):
-        raise HTTPException(status_code=404, detail="Run not found")
+        return _download_gcs_artifacts_zip(run_id)
 
     artifacts_dir = _run_artifacts_dir(run_id)
     if not os.path.exists(artifacts_dir):
