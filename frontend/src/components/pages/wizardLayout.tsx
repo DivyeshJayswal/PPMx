@@ -13,6 +13,9 @@ import Step5Config, {
   type GnnConfig,
   type TransformerConfig,
 } from "../steps/Step5Config";
+import Step5ExplainabilityConfig, {
+  type ExplainabilityConfig,
+} from "../steps/Step5ExplainabilityConfig";
 import Step6Review from "../steps/Step6Review";
 import ResultsView from "../results/ResultsView";
 
@@ -31,7 +34,7 @@ import {
   type RunStatus,
 } from "../../lib/api";
 
-const TOTAL_STEPS = 7;
+const TOTAL_STEPS = 8;
 
 export type PipelineStatus = "idle" | "running" | "completed";
 export type ViewMode = "wizard" | "results";
@@ -91,12 +94,15 @@ function detectExplainabilityProgress(lines: string[]): number | null {
   if (
     joined.includes("generating comprehensive analysis") ||
     joined.includes("generating comparison report") ||
-    joined.includes("feature importance summary saved")
+    joined.includes("feature importance summary saved") ||
+    joined.includes("global view importance")
   ) {
     return 90;
   }
   if (
     joined.includes("graphlime local analysis") ||
+    joined.includes("local explanation") ||
+    joined.includes("sample_0_explanation") ||
     joined.includes("running lime") ||
     joined.includes("generating lime explanations")
   ) {
@@ -111,6 +117,9 @@ function detectExplainabilityProgress(lines: string[]): number | null {
   }
   if (
     joined.includes("gradient analysis") ||
+    joined.includes("heterogeneous gnn") ||
+    joined.includes("gnnexplainer") ||
+    joined.includes("global view importance") ||
     joined.includes("running shap") ||
     joined.includes("computing shap values") ||
     joined.includes("gnn explainability") ||
@@ -247,7 +256,7 @@ function validateTransformerConfig(cfg: TransformerConfig): boolean {
 }
 
 function validateGnnConfig(cfg: GnnConfig): boolean {
-  const positiveInts = [cfg.hidden, cfg.epochs, cfg.batch_size, cfg.patience].every(
+  const positiveInts = [cfg.hidden, cfg.heads, cfg.num_layers, cfg.epochs, cfg.batch_size, cfg.patience].every(
     (v) => Number.isInteger(v) && v > 0
   );
 
@@ -257,6 +266,28 @@ function validateGnnConfig(cfg: GnnConfig): boolean {
   const lrOk = typeof cfg.lr === "number" && cfg.lr > 0;
 
   return positiveInts && dropoutOk && lrOk;
+}
+
+function validateExplainabilityConfig(
+  cfg: ExplainabilityConfig,
+  model: "gnn" | "transformer" | null,
+  method: ExplainValue | null
+): boolean {
+  if (!method) return false;
+  if (method === "none") return true;
+  if (model !== "gnn") return true;
+
+  const localOk = Number.isInteger(cfg.local_explanation_samples) && cfg.local_explanation_samples >= 0;
+  const globalOk =
+    Number.isInteger(cfg.global_explanation_sample_percent) &&
+    cfg.global_explanation_sample_percent >= 1 &&
+    cfg.global_explanation_sample_percent <= 100;
+  const minOk = Number.isInteger(cfg.min_prefix_length) && cfg.min_prefix_length >= 1;
+  const maxOk =
+    cfg.max_prefix_length === null ||
+    (Number.isInteger(cfg.max_prefix_length) && cfg.max_prefix_length >= cfg.min_prefix_length);
+
+  return localOk && globalOk && minOk && maxOk;
 }
 
 export default function WizardLayout() {
@@ -301,6 +332,8 @@ export default function WizardLayout() {
   const defaultGnnConfig = useMemo<GnnConfig>(
     () => ({
       hidden: 64,
+      heads: 4,
+      num_layers: 2,
       dropout_rate: 0.1,
       lr: 4e-4,
       epochs: 5,
@@ -310,9 +343,21 @@ export default function WizardLayout() {
     []
   );
 
+  const defaultExplainabilityConfig = useMemo<ExplainabilityConfig>(
+    () => ({
+      local_explanation_samples: 5,
+      global_explanation_sample_percent: 1,
+      min_prefix_length: 1,
+      max_prefix_length: null,
+    }),
+    []
+  );
+
   const [transformerConfig, setTransformerConfig] =
     useState<TransformerConfig>(defaultTransformerConfig);
   const [gnnConfig, setGnnConfig] = useState<GnnConfig>(defaultGnnConfig);
+  const [explainabilityConfig, setExplainabilityConfig] =
+    useState<ExplainabilityConfig>(defaultExplainabilityConfig);
 
   /* -------------------- RUN STATE -------------------- */
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>("idle");
@@ -372,8 +417,10 @@ export default function WizardLayout() {
       case 4:
         return explainMethod !== null;
       case 5:
-        return pipelineStatus === "completed";
+        return validateExplainabilityConfig(explainabilityConfig, modelTypeNormalized, explainMethod);
       case 6:
+        return pipelineStatus === "completed";
+      case 7:
         return true;
       default:
         return true;
@@ -388,6 +435,18 @@ export default function WizardLayout() {
     4 < step && isStepValid(4),
     5 < step && isStepValid(5),
     6 < step && isStepValid(6),
+    7 < step && isStepValid(7),
+  ];
+
+  const accessibleSteps = [
+    true,
+    isStepValid(0),
+    isStepValid(0) && isStepValid(1),
+    isStepValid(0) && isStepValid(1) && isStepValid(2),
+    isStepValid(0) && isStepValid(1) && isStepValid(2) && isStepValid(3),
+    isStepValid(0) && isStepValid(1) && isStepValid(2) && isStepValid(3) && isStepValid(4),
+    isStepValid(0) && isStepValid(1) && isStepValid(2) && isStepValid(3) && isStepValid(4) && isStepValid(5),
+    pipelineStatus === "completed" || viewMode === "results",
   ];
 
   /* -------------------- HANDLERS -------------------- */
@@ -455,6 +514,19 @@ export default function WizardLayout() {
     setRunLogs([]);
   };
 
+  const prepareRerun = () => {
+    setPipelineStatus("idle");
+    setProgress(0);
+    setRunId(null);
+    setRunStatus(null);
+    setArtifacts([]);
+    setRunError(null);
+    setAutoDownloadedRunId(null);
+    setRunLogs([]);
+    setViewMode("wizard");
+    setStep(6);
+  };
+
   // Clear explainability immediately when user changes model type (no effects)
   const handleSelectModelType = (v: string) => {
     const nextModel = normalizeModelType(v);
@@ -464,6 +536,7 @@ export default function WizardLayout() {
     setConfigMode(null);
     setTransformerConfig(defaultTransformerConfig);
     setGnnConfig(defaultGnnConfig);
+    setExplainabilityConfig(defaultExplainabilityConfig);
 
     if (!isExplainAllowed(explainMethod, nextModel)) {
       setExplainMethod(null);
@@ -488,6 +561,7 @@ export default function WizardLayout() {
     setConfigMode(null);
     setTransformerConfig(defaultTransformerConfig);
     setGnnConfig(defaultGnnConfig);
+    setExplainabilityConfig(defaultExplainabilityConfig);
 
     setPipelineStatus("idle");
     setProgress(0);
@@ -537,6 +611,10 @@ export default function WizardLayout() {
         : configMode === "custom"
         ? gnnConfig
         : defaultGnnConfig;
+    const explainabilityConfigToSend =
+      mt === "gnn" && explainToSend && explainToSend !== "none"
+        ? explainabilityConfig
+        : defaultExplainabilityConfig;
 
     setPipelineStatus("running");
     setProgress(5);
@@ -547,6 +625,7 @@ export default function WizardLayout() {
         model_type: mt,
         task,
         config: configToSend,
+        explainability_config: explainabilityConfigToSend,
         split: splitConfig,
         explainability: explainToSend,
         target_column: task === "custom_activity" ? customTargetColumn : null,
@@ -605,7 +684,7 @@ export default function WizardLayout() {
           if (cancelled) return;
           setArtifacts(arts.artifacts);
           setPipelineStatus("completed");
-          setStep(6);
+          setStep(7);
           setViewMode("results");
           if (autoDownloadedRunId !== runId) {
             const link = document.createElement("a");
@@ -660,15 +739,17 @@ export default function WizardLayout() {
       </div>
 
       <div className="flex flex-1 min-h-0">
-        <Sidebar currentStep={step} completedSteps={completedSteps} />
+        <Sidebar currentStep={step} completedSteps={completedSteps} accessibleSteps={accessibleSteps} />
 
         {showResults ? (
           <ResultsView
             runId={runId}
             onBackToPipeline={() => {
               setViewMode("wizard");
-              setStep(5);
+              setStep(6);
             }}
+            onRerun={prepareRerun}
+            onFinish={resetAll}
           />
         ) : (
           <div className="flex-1 flex flex-col min-w-0 bg-brand-50">
@@ -750,6 +831,16 @@ export default function WizardLayout() {
                 )}
 
                 {step === 5 && (
+                  <Step5ExplainabilityConfig
+                    modelType={modelTypeNormalized}
+                    method={explainMethod}
+                    config={explainabilityConfig}
+                    defaultConfig={defaultExplainabilityConfig}
+                    onChange={setExplainabilityConfig}
+                  />
+                )}
+
+                {step === 6 && (
                   <Step6Review
                     uploadedFile={uploadedFile}
                     dataset={dataset}
@@ -759,6 +850,7 @@ export default function WizardLayout() {
                     mappingMode={mappingMode}
                     manualMapping={manualMapping}
                     configMode={configMode}
+                    explainabilityConfig={explainabilityConfig}
                     pipelineStatus={pipelineStatus}
                     progress={progress}
                     runId={runId}
@@ -767,8 +859,10 @@ export default function WizardLayout() {
                     logs={runLogs}
                     error={runError}
                     onStartPipeline={startPipeline}
+                    onRerun={prepareRerun}
+                    onFinish={resetAll}
                     onViewResults={() => {
-                      setStep(6);
+                      setStep(7);
                       setViewMode("results");
                     }}
                   />
@@ -790,6 +884,9 @@ export default function WizardLayout() {
                   nextStep();
                 }}
               />
+              <div className="pt-4 text-center text-sm text-gray-500">
+                Built with <span className="text-pink-500">❤</span> at TUM
+              </div>
             </div>
           </div>
         )}

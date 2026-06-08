@@ -1,6 +1,7 @@
 # explainability/gnns/__init__.py
 
 from .gnn_explainer import (
+    ProphetGNNExplainer,
     GradientExplainer,
     TemporalGradientExplainer,
     GraphLIMEExplainer,
@@ -9,6 +10,7 @@ from .gnn_explainer import (
 )
 
 __all__ = [
+    'ProphetGNNExplainer',
     'GradientExplainer',
     'TemporalGradientExplainer',
     'GraphLIMEExplainer',

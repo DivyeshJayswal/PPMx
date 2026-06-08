@@ -18,6 +18,8 @@ export type TransformerConfig = {
 // Must match backend `default_gnn_config()` keys/types in `ppm_pipeline.py`.
 export type GnnConfig = {
   hidden: number;
+  heads: number;
+  num_layers: number;
   dropout_rate: number;
   lr: number;
   epochs: number;
@@ -251,6 +253,20 @@ function ParameterGrid({
         onChange={(e) => update("hidden", n(e.target.value))}
       />
       <ParameterField
+        label="Attention heads"
+        value={cfg.heads}
+        placeholder="4"
+        editable={editable}
+        onChange={(e) => update("heads", n(e.target.value))}
+      />
+      <ParameterField
+        label="GAT layers"
+        value={cfg.num_layers}
+        placeholder="2"
+        editable={editable}
+        onChange={(e) => update("num_layers", n(e.target.value))}
+      />
+      <ParameterField
         label="Dropout rate"
         value={cfg.dropout_rate}
         placeholder="0.1"
@@ -306,6 +322,7 @@ function ParameterField({
   min,
   max,
   step,
+  helpText,
   onChange,
 }: {
   label: string;
@@ -315,6 +332,7 @@ function ParameterField({
   min?: string;
   max?: string;
   step?: string;
+  helpText?: string;
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
 }) {
   return (
@@ -334,6 +352,7 @@ function ParameterField({
       ) : (
         <div className="px-3 py-2 font-medium text-black">{value}</div>
       )}
+      {helpText ? <div className="mt-2 text-xs text-gray-500">{helpText}</div> : null}
     </div>
   );
 }

@@ -5,10 +5,16 @@ import { artifactUrl, artifactsZipUrl, listArtifacts } from "../../lib/api";
 type ResultsViewProps = {
   runId: string | null;
   onBackToPipeline: () => void;
+  onRerun: () => void;
+  onFinish: () => void;
 };
 
-export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProps) {
+export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish }: ResultsViewProps) {
   const [pngs, setPngs] = useState<string[]>([]);
+  const [summaryData, setSummaryData] = useState<Record<string, unknown> | null>(null);
+  const [metricsData, setMetricsData] = useState<Record<string, unknown> | null>(null);
+  const [datasetSummaryData, setDatasetSummaryData] = useState<Record<string, unknown> | null>(null);
+  const [trainingSummaryData, setTrainingSummaryData] = useState<Record<string, unknown> | null>(null);
   const [benchmarkRows, setBenchmarkRows] = useState<Array<Record<string, string>>>([]);
   const [benchmarkHeaders, setBenchmarkHeaders] = useState<string[]>([]);
   const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
@@ -36,6 +42,10 @@ export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProp
     const loadArtifacts = async () => {
       if (!runId) {
         setPngs([]);
+        setSummaryData(null);
+        setMetricsData(null);
+        setDatasetSummaryData(null);
+        setTrainingSummaryData(null);
         setBenchmarkRows([]);
         setBenchmarkHeaders([]);
         return;
@@ -50,11 +60,42 @@ export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProp
           path.toLowerCase().endsWith(".png")
         );
         setPngs(images);
+        const [summaryRes, metricsRes, datasetSummaryRes, trainingSummaryRes] = await Promise.all([
+          fetch(artifactUrl(runId, "summary.json")),
+          fetch(artifactUrl(runId, "metrics.json")),
+          fetch(artifactUrl(runId, "dataset_summary.json")),
+          fetch(artifactUrl(runId, "training_summary.json")),
+        ]);
+        if (cancelled) return;
+        if (summaryRes.ok) {
+          setSummaryData((await summaryRes.json()) as Record<string, unknown>);
+        } else {
+          setSummaryData(null);
+        }
+        if (metricsRes.ok) {
+          setMetricsData((await metricsRes.json()) as Record<string, unknown>);
+        } else {
+          setMetricsData(null);
+        }
+        if (datasetSummaryRes.ok) {
+          setDatasetSummaryData((await datasetSummaryRes.json()) as Record<string, unknown>);
+        } else {
+          setDatasetSummaryData(null);
+        }
+        if (trainingSummaryRes.ok) {
+          setTrainingSummaryData((await trainingSummaryRes.json()) as Record<string, unknown>);
+        } else {
+          setTrainingSummaryData(null);
+        }
       } catch (err) {
         if (cancelled) return;
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
         setPngs([]);
+        setSummaryData(null);
+        setMetricsData(null);
+        setDatasetSummaryData(null);
+        setTrainingSummaryData(null);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -73,24 +114,32 @@ export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProp
       if (!runId) return;
       setBenchmarkError(null);
       try {
-        const csvUrl = artifactUrl(runId, "explainability/benchmark/benchmark_summary.csv");
-        const resp = await fetch(csvUrl);
-        if (!resp.ok) return;
-        const text = await resp.text();
-        if (cancelled) return;
-        const lines = text.trim().split(/\r?\n/).filter(Boolean);
-        if (!lines.length) return;
-        const headers = lines[0].split(",").map((h) => h.trim());
-        const rows = lines.slice(1).map((line) => {
-          const cols = line.split(",");
-          const row: Record<string, string> = {};
-          headers.forEach((h, i) => {
-            row[h] = (cols[i] ?? "").trim();
+        const candidatePaths = [
+          "explainability/benchmark/benchmark_summary.csv",
+          "explainability/benchmark/benchmark_results_summary.csv",
+        ];
+
+        for (const candidate of candidatePaths) {
+          const csvUrl = artifactUrl(runId, candidate);
+          const resp = await fetch(csvUrl);
+          if (!resp.ok) continue;
+          const text = await resp.text();
+          if (cancelled) return;
+          const lines = text.trim().split(/\r?\n/).filter(Boolean);
+          if (!lines.length) continue;
+          const headers = lines[0].split(",").map((h) => h.trim());
+          const rows = lines.slice(1).map((line) => {
+            const cols = line.split(",");
+            const row: Record<string, string> = {};
+            headers.forEach((h, i) => {
+              row[h] = (cols[i] ?? "").trim();
+            });
+            return row;
           });
-          return row;
-        });
-        setBenchmarkHeaders(headers);
-        setBenchmarkRows(rows);
+          setBenchmarkHeaders(headers);
+          setBenchmarkRows(rows);
+          return;
+        }
       } catch (e) {
         if (!cancelled) {
           setBenchmarkError(e instanceof Error ? e.message : String(e));
@@ -196,6 +245,13 @@ export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProp
               </a>
             )}
 
+            <ResultsSummary
+              summaryData={summaryData}
+              metricsData={metricsData}
+              datasetSummaryData={datasetSummaryData}
+              trainingSummaryData={trainingSummaryData}
+            />
+
             <div className="border-t pt-4 space-y-6">
               <div className="text-sm font-medium text-gray-800">Result Images</div>
               {loading && <div className="text-sm text-brand-600">Loading images...</div>}
@@ -265,6 +321,24 @@ export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProp
                     runId={runId}
                     onOpen={setActiveImage}
                   />
+                  <ImageSection
+                    title="GNN Local Graph Explanations"
+                    paths={pngs.filter((p) =>
+                      normalizePath(p).includes("explainability/prophet/") &&
+                      normalizePath(p).includes("/local/")
+                    )}
+                    runId={runId}
+                    onOpen={setActiveImage}
+                  />
+                  <ImageSection
+                    title="GNN Global Explainability"
+                    paths={pngs.filter((p) =>
+                      normalizePath(p).includes("explainability/prophet/") &&
+                      normalizePath(p).includes("/global/")
+                    )}
+                    runId={runId}
+                    onOpen={setActiveImage}
+                  />
                   <BenchmarkSection
                     headers={benchmarkHeaders}
                     rows={benchmarkRows}
@@ -279,12 +353,26 @@ export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProp
 
       <div className="shrink-0 px-8 pb-6 border-t border-brand-100 bg-white">
         <div className="flex items-center justify-between gap-4 pt-4">
-          <button
-            className="px-4 py-2 border border-brand-200 rounded-md text-sm text-brand-700 hover:bg-brand-50"
-            onClick={onBackToPipeline}
-          >
-            Back to Pipeline
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              className="px-4 py-2 border border-brand-200 rounded-md text-sm text-brand-700 hover:bg-brand-50"
+              onClick={onBackToPipeline}
+            >
+              Back to Pipeline
+            </button>
+            <button
+              className="px-4 py-2 border border-brand-300 rounded-md text-sm text-brand-700 bg-white hover:bg-brand-50"
+              onClick={onRerun}
+            >
+              Rerun Pipeline
+            </button>
+            <button
+              className="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 bg-white hover:bg-gray-50"
+              onClick={onFinish}
+            >
+              Finish
+            </button>
+          </div>
           <p className="text-sm text-gray-500">
             Built with <span className="text-pink-500">❤</span> at TUM
           </p>
@@ -332,6 +420,322 @@ export default function ResultsView({ runId, onBackToPipeline }: ResultsViewProp
 
 function normalizePath(path: string) {
   return path.replace(/\\/g, "/").toLowerCase();
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function formatNumber(value: unknown) {
+  const num = asNumber(value);
+  if (num === null) return "N/A";
+  return num.toLocaleString();
+}
+
+function formatDecimal(value: unknown, digits = 4) {
+  const num = asNumber(value);
+  if (num === null) return "N/A";
+  return num.toFixed(digits);
+}
+
+function formatPercent(value: unknown, digits = 1) {
+  const num = asNumber(value);
+  if (num === null) return "N/A";
+  return `${(num * 100).toFixed(digits)}%`;
+}
+
+function formatImprovement(modelValue: unknown, baselineValue: unknown) {
+  const model = asNumber(modelValue);
+  const baseline = asNumber(baselineValue);
+  if (model === null || baseline === null || baseline <= 0) return null;
+  const improvement = ((baseline - model) / baseline) * 100;
+  const direction = improvement >= 0 ? "better" : "worse";
+  const magnitude = Math.abs(improvement);
+  let verdict = "Weak";
+  if (improvement >= 40) verdict = "Strong";
+  else if (improvement >= 20) verdict = "Moderate";
+  else if (improvement >= 0) verdict = "Small";
+  else verdict = "Worse";
+  return `${magnitude.toFixed(1)}% ${direction} (${verdict})`;
+}
+
+function titleFromTask(task: unknown) {
+  const raw = asString(task);
+  if (!raw) return "N/A";
+  return raw.replace(/_/g, " ");
+}
+
+function ResultsSummary({
+  summaryData,
+  metricsData,
+  datasetSummaryData,
+  trainingSummaryData,
+}: {
+  summaryData: Record<string, unknown> | null;
+  metricsData: Record<string, unknown> | null;
+  datasetSummaryData: Record<string, unknown> | null;
+  trainingSummaryData: Record<string, unknown> | null;
+}) {
+  const summary = asRecord(summaryData);
+  const metricsRoot = asRecord(metricsData);
+  const datasetSummary = asRecord(datasetSummaryData);
+  const trainingSummary = asRecord(trainingSummaryData);
+  const dataset = asRecord(summary?.dataset);
+  const request = asRecord(summary?.request);
+  const split = asRecord(metricsRoot?.split);
+  const config = asRecord(metricsRoot?.config);
+  const metrics = asRecord(metricsRoot?.metrics) ?? asRecord(summary?.metrics);
+  const taskName = asString(request?.task ?? metricsRoot?.task ?? summary?.request);
+
+  const numEvents = asNumber(dataset?.num_events);
+  const numCases = asNumber(dataset?.num_cases);
+  const avgEventsPerCase =
+    numEvents !== null && numCases !== null && numCases > 0 ? numEvents / numCases : null;
+
+  const fallbackDatasetRows = [
+    { label: "Dataset", value: asString(dataset?.filename) ?? "N/A" },
+    { label: "Cases", value: formatNumber(dataset?.num_cases) },
+    { label: "Events", value: formatNumber(dataset?.num_events) },
+    { label: "Avg. events per case", value: avgEventsPerCase === null ? "N/A" : avgEventsPerCase.toFixed(2) },
+    { label: "Model type", value: asString(request?.model_type) ?? asString(metricsRoot?.model_type) ?? "N/A" },
+    { label: "Task", value: titleFromTask(request?.task ?? metricsRoot?.task) },
+    { label: "Explainability", value: asString(request?.explainability) ?? "N/A" },
+    { label: "Finished", value: asString(summary?.finished_at) ?? asString(metricsRoot?.finished_at) ?? "N/A" },
+  ];
+
+  const fallbackTrainingRows = [
+    { label: "Epochs", value: formatNumber(config?.epochs) },
+    { label: "Batch size", value: formatNumber(config?.batch_size) },
+    { label: "Patience", value: formatNumber(config?.patience) },
+    { label: "Learning rate", value: formatDecimal(config?.lr, 5) },
+    { label: "Dropout", value: formatDecimal(config?.dropout_rate, 3) },
+    { label: "Hidden size", value: formatNumber(config?.hidden ?? config?.d_model) },
+    { label: "Attention heads", value: formatNumber(config?.heads ?? config?.num_heads) },
+    { label: "Layers/Blocks", value: formatNumber(config?.num_layers ?? config?.num_blocks) },
+    { label: "Test split", value: formatPercent(split?.test_size) },
+    { label: "Validation split", value: formatPercent(split?.val_split) },
+  ];
+
+  const datasetRows = extractSummaryRows(datasetSummary) ?? fallbackDatasetRows;
+  const trainingRows = extractSummaryRows(trainingSummary) ?? fallbackTrainingRows;
+  const visibleDatasetRows =
+    taskName === "next_activity" || taskName === "custom_activity"
+      ? datasetRows.filter((row) => row.label !== "Proportion of Positive Cases")
+      : datasetRows;
+  const visibleTrainingRows = filterRowsForSelectedTask(trainingRows, taskName);
+
+  const metricRows = buildMetricRows(metrics, taskName);
+
+  if (!summary && !metricsRoot) return null;
+
+  return (
+    <section className="space-y-6 border-t pt-4">
+      <div className="grid gap-6 xl:grid-cols-2">
+        <SummaryTable title="Dataset Summary" rows={visibleDatasetRows} showAllRows />
+        <SummaryTable title="Training Summary" rows={visibleTrainingRows} showAllRows />
+      </div>
+      {metricRows.length > 0 ? (
+        <SummaryTable title="Performance Summary" rows={metricRows} compact />
+      ) : null}
+    </section>
+  );
+}
+
+function extractSummaryRows(data: Record<string, unknown> | null) {
+  const rows = data?.rows;
+  if (!Array.isArray(rows)) return null;
+  const normalized = rows
+    .map((row) => {
+      const record = asRecord(row);
+      if (!record) return null;
+      return {
+        label: asString(record.label) ?? "N/A",
+        value:
+          typeof record.value === "string" || typeof record.value === "number"
+            ? String(record.value)
+            : "N/A",
+      };
+    })
+    .filter((row): row is { label: string; value: string } => row !== null);
+  return normalized.length ? normalized : null;
+}
+
+function filterRowsForSelectedTask(
+  rows: Array<{ label: string; value: string }>,
+  taskName?: string | null
+) {
+  if (taskName === "unified") return rows;
+
+  const isEventTime = taskName === "event_time";
+  const isRemainingTime = taskName === "remaining_time";
+  const isActivity = taskName === "next_activity" || taskName === "custom_activity";
+
+  return rows.filter((row) => {
+    const label = row.label.toLowerCase();
+    const isEventMetric = label.includes("event time");
+    const isRemainingMetric = label.includes("remaining time");
+    const isAccuracyMetric = label.includes("accuracy");
+
+    if (isEventTime) {
+      if (isRemainingMetric || isAccuracyMetric) return false;
+      return true;
+    }
+    if (isRemainingTime) {
+      if (isEventMetric || isAccuracyMetric) return false;
+      return true;
+    }
+    if (isActivity) {
+      if (isEventMetric || isRemainingMetric) return false;
+      return true;
+    }
+    return true;
+  });
+}
+
+function buildMetricRows(metrics: Record<string, unknown> | null, taskName?: string | null) {
+  if (!metrics) return [];
+  const rows: Array<{ label: string; value: string }> = [];
+  const isNextActivityTask =
+    taskName === "next_activity" || taskName === "custom_activity";
+  const isEventTimeTask = taskName === "event_time";
+  const isRemainingTimeTask = taskName === "remaining_time";
+  const isUnifiedTask = taskName === "unified";
+  const accuracy = metrics.accuracy;
+  const loss = metrics.loss ?? metrics.test_loss;
+  const maeTime = metrics.mae_time ?? (isEventTimeTask ? metrics.test_mae : undefined);
+  const maeRem = metrics.mae_rem ?? (isRemainingTimeTask ? metrics.test_mae : undefined);
+  const eventMeanBaseline = metrics.event_time_baseline_mean_mae;
+  const eventMedianBaseline = metrics.event_time_baseline_median_mae;
+  const remMeanBaseline = metrics.remaining_time_baseline_mean_mae;
+  const remMedianBaseline = metrics.remaining_time_baseline_median_mae;
+  const showAccuracy =
+    taskName === "next_activity" ||
+    taskName === "custom_activity" ||
+    isUnifiedTask ||
+    (!taskName && accuracy !== undefined);
+  if (showAccuracy && accuracy !== undefined) {
+    rows.push({ label: "Accuracy", value: formatPercent(accuracy, 2) });
+  }
+  const showEventTimeMetrics = isUnifiedTask || isEventTimeTask || (!taskName && maeTime !== undefined);
+  const showRemainingTimeMetrics = isUnifiedTask || isRemainingTimeTask || (!taskName && maeRem !== undefined);
+
+  if (showEventTimeMetrics && maeTime !== undefined) {
+    rows.push({ label: "Event time MAE", value: formatDecimal(maeTime) });
+  }
+  if (showEventTimeMetrics && eventMeanBaseline !== undefined) {
+    rows.push({ label: "Event time mean baseline MAE", value: formatDecimal(eventMeanBaseline) });
+    const summary = formatImprovement(maeTime, eventMeanBaseline);
+    if (summary) {
+      rows.push({ label: "Event time vs mean baseline", value: summary });
+    }
+  }
+  if (showEventTimeMetrics && eventMedianBaseline !== undefined) {
+    rows.push({ label: "Event time median baseline MAE", value: formatDecimal(eventMedianBaseline) });
+    const summary = formatImprovement(maeTime, eventMedianBaseline);
+    if (summary) {
+      rows.push({ label: "Event time vs median baseline", value: summary });
+    }
+  }
+  if (showRemainingTimeMetrics && maeRem !== undefined) {
+    rows.push({ label: "Remaining time MAE", value: formatDecimal(maeRem) });
+  }
+  if (showRemainingTimeMetrics && remMeanBaseline !== undefined) {
+    rows.push({ label: "Remaining time mean baseline MAE", value: formatDecimal(remMeanBaseline) });
+    const summary = formatImprovement(maeRem, remMeanBaseline);
+    if (summary) {
+      rows.push({ label: "Remaining time vs mean baseline", value: summary });
+    }
+  }
+  if (showRemainingTimeMetrics && remMedianBaseline !== undefined) {
+    rows.push({ label: "Remaining time median baseline MAE", value: formatDecimal(remMedianBaseline) });
+    const summary = formatImprovement(maeRem, remMedianBaseline);
+    if (summary) {
+      rows.push({ label: "Remaining time vs median baseline", value: summary });
+    }
+  }
+  if (loss !== undefined) {
+    rows.push({ label: "Loss", value: formatDecimal(loss) });
+  }
+  for (const [key, value] of Object.entries(metrics)) {
+    if (
+      [
+        "accuracy",
+        "loss",
+        "test_loss",
+        "mae_time",
+        "mae_rem",
+        "test_mae",
+        "event_time_baseline_mean_value",
+        "event_time_baseline_median_value",
+        "event_time_baseline_mean_mae",
+        "event_time_baseline_median_mae",
+        "remaining_time_baseline_mean_value",
+        "remaining_time_baseline_median_value",
+        "remaining_time_baseline_mean_mae",
+        "remaining_time_baseline_median_mae",
+      ].includes(key)
+    ) {
+      continue;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const lowerKey = key.toLowerCase();
+      if (isNextActivityTask && (lowerKey.includes("mae") || lowerKey.includes("event_time") || lowerKey.includes("remaining_time"))) {
+        continue;
+      }
+      if (isEventTimeTask && (lowerKey.includes("remaining_time") || lowerKey.includes("mae_rem") || lowerKey.includes("accuracy"))) {
+        continue;
+      }
+      if (isRemainingTimeTask && (lowerKey.includes("event_time") || lowerKey.includes("mae_time") || lowerKey.includes("accuracy"))) {
+        continue;
+      }
+      rows.push({ label: key.replace(/_/g, " "), value: formatDecimal(value) });
+    }
+  }
+  return rows;
+}
+
+function SummaryTable({
+  title,
+  rows,
+  compact = false,
+  showAllRows = false,
+}: {
+  title: string;
+  rows: Array<{ label: string; value: string }>;
+  compact?: boolean;
+  showAllRows?: boolean;
+}) {
+  const filtered = showAllRows ? rows : rows.filter((row) => row.value !== "N/A");
+  if (!filtered.length) return null;
+  return (
+    <section className="space-y-3">
+      <div className="text-sm font-semibold text-brand-900">{title}</div>
+      <div className="overflow-auto border border-brand-100 rounded-lg bg-white">
+        <table className="min-w-full text-sm">
+          <tbody>
+            {filtered.map((row) => (
+              <tr key={`${title}-${row.label}`} className="odd:bg-white even:bg-brand-50/40">
+                <td className={`px-3 py-2 border-b border-brand-100 text-gray-700 font-medium ${compact ? "w-1/3" : "w-1/2"}`}>
+                  {row.label}
+                </td>
+                <td className="px-3 py-2 border-b border-brand-100 text-gray-700">{row.value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
 }
 
 function ImageSection({
@@ -395,94 +799,203 @@ function BenchmarkSection({
   }
   if (!headers.length || !rows.length) return null;
 
-  const compactRows = buildCompactBenchmark(rows);
-  if (!compactRows.length) return null;
+  const benchmarkTable = buildBenchmarkMatrix(rows);
+  const summaryMetrics = buildBenchmarkSummary(rows);
+  if (!benchmarkTable.rows.length && !summaryMetrics.length) return null;
 
   return (
     <section className="space-y-3">
       <div className="text-sm font-semibold text-brand-900">Benchmark</div>
-      <div className="text-xs text-brand-600">Showing k10 metrics only.</div>
-      <div className="overflow-auto border border-brand-100 rounded-lg bg-white">
-        <table className="min-w-full text-sm">
-          <thead className="bg-brand-50 text-brand-800">
-            <tr>
-              <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Metric</th>
-              <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Value</th>
-              <th className="text-left px-3 py-2 font-medium border-b border-brand-100">
-                Best
-              </th>
-              <th className="text-left px-3 py-2 font-medium border-b border-brand-100">
-                Feedback
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {compactRows.map((row, idx) => (
-              <tr key={idx} className="odd:bg-white even:bg-brand-50/40">
-                <td
-                  className="px-3 py-2 border-b border-brand-100 text-gray-700"
-                  title={metricHelp(row.metric)}
-                >
-                  {row.metric}
-                </td>
-                <td className="px-3 py-2 border-b border-brand-100 text-gray-700">{row.value}</td>
-                <td className="px-3 py-2 border-b border-brand-100 text-gray-700">
-                  {row.best}
-                </td>
-                <td className="px-3 py-2 border-b border-brand-100 text-gray-700">
-                  {row.feedback}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="text-xs text-brand-600">
+        Columns are k-values. Missing metrics are shown as "-", usually because too few valid samples exist for that k.
       </div>
+      {benchmarkTable.rows.length ? (
+        <div className="overflow-auto border border-brand-100 rounded-lg bg-white">
+          <table className="min-w-full text-sm">
+            <thead className="bg-brand-50 text-brand-800">
+              <tr>
+                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Metric</th>
+                {benchmarkTable.kColumns.map((k) => (
+                  <th
+                    key={k}
+                    className="text-left px-3 py-2 font-medium border-b border-brand-100 min-w-[170px]"
+                  >
+                    {k}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {benchmarkTable.metricRows.map((row) => (
+                <tr key={row.metricKey} className="odd:bg-white even:bg-brand-50/40">
+                  <td
+                    className="px-3 py-2 border-b border-brand-100 text-gray-800 font-medium"
+                    title={metricHelp(row.metricKey)}
+                  >
+                    {row.label}
+                  </td>
+                  {benchmarkTable.kColumns.map((k) => {
+                    const cell = row.values[k];
+                    return (
+                      <td key={`${row.metricKey}-${k}`} className="px-3 py-2 border-b border-brand-100 text-gray-700 align-top">
+                        <div>{cell?.value ?? "-"}</div>
+                        <div className="text-xs text-gray-500">{cell?.feedback ?? "-"}</div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {summaryMetrics.length ? (
+        <div className="overflow-auto border border-brand-100 rounded-lg bg-white">
+          <table className="min-w-full text-sm">
+            <thead className="bg-brand-50 text-brand-800">
+              <tr>
+                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Summary metric</th>
+                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Value</th>
+                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Best</th>
+                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Feedback</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryMetrics.map((row) => (
+                <tr key={row.metric} className="odd:bg-white even:bg-brand-50/40">
+                  <td className="px-3 py-2 border-b border-brand-100 text-gray-700" title={metricHelp(row.metric)}>
+                    {row.label}
+                  </td>
+                  <td className="px-3 py-2 border-b border-brand-100 text-gray-700">{row.value}</td>
+                  <td className="px-3 py-2 border-b border-brand-100 text-gray-700">{row.best}</td>
+                  <td className="px-3 py-2 border-b border-brand-100 text-gray-700">{row.feedback}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
     </section>
   );
 }
 
-function buildCompactBenchmark(rows: Array<Record<string, string>>) {
-  const compact = rows.filter((row) => {
-    const metric = row.metric || row.Metric || row.METRIC || "";
-    const normalized = metric.toLowerCase();
-    if (!normalized.includes("k10") && !normalized.includes("temporal_consistency")) {
-      return false;
-    }
-    if (
-      normalized.includes("p_value") ||
-      normalized.includes("mean") ||
-      normalized.includes("median") ||
-      normalized.includes("std") ||
-      normalized.includes("position") ||
-      normalized.includes("rank_correlation")
-    ) {
-      return false;
-    }
-    return true;
-  });
+function buildBenchmarkMatrix(rows: Array<Record<string, string>>) {
+  const kColumns = ["k5", "k10", "k15", "k20", "k25"];
+  const metricRows = [
+    { metricKey: "spearman_correlation", label: "Faithfulness Spearman" },
+    { metricKey: "pearson_correlation", label: "Faithfulness Pearson" },
+    { metricKey: "comprehensiveness_mean", label: "Comprehensiveness" },
+    { metricKey: "sufficiency_mean", label: "Sufficiency" },
+    { metricKey: "jaccard_similarity", label: "Agreement Jaccard" },
+    { metricKey: "top_k_overlap", label: "Agreement Overlap" },
+  ];
 
-  return compact.map((row) => {
-    const metric = row.metric || row.Metric || row.METRIC || "";
+  const structuredMetricRows = metricRows.map((metric) => ({
+    metricKey: metric.metricKey,
+    label: metric.label,
+    values: Object.fromEntries(kColumns.map((k) => [k, null])) as Record<
+      string,
+      { value: string; feedback: string } | null
+    >,
+  }));
+
+  for (const row of rows) {
+    const metric = ((row.metric || row.Metric || row.METRIC || "") as string).toLowerCase();
     const rawValue = row.value || row.Value || row.VALUE || "";
     const num = Number(rawValue);
-    const value = Number.isFinite(num) ? num.toFixed(4) : rawValue;
-    const feedback = Number.isFinite(num) ? scoreFeedback(metric, num) : "N/A";
-    const best = bestTarget(metric);
-    return { metric, value, best, feedback };
-  });
+    const kMatch = metric.match(/_(k\d+)_/);
+    if (!kMatch) continue;
+    const kKey = kMatch[1];
+    if (!kColumns.includes(kKey)) continue;
+
+    const resolvedColumn =
+      metric.includes("spearman_correlation")
+        ? "spearman_correlation"
+        : metric.includes("pearson_correlation")
+          ? "pearson_correlation"
+          : metric.includes("comprehensiveness") && metric.endsWith("_mean")
+            ? "comprehensiveness_mean"
+            : metric.includes("sufficiency") && metric.endsWith("_mean")
+              ? "sufficiency_mean"
+              : metric.includes("jaccard_similarity")
+                ? "jaccard_similarity"
+                : metric.includes("top_k_overlap")
+                  ? "top_k_overlap"
+                  : null;
+
+    if (!resolvedColumn) continue;
+    const targetMetricRow = structuredMetricRows.find((entry) => entry.metricKey === resolvedColumn);
+    if (!targetMetricRow) continue;
+    targetMetricRow.values[kKey] = {
+      value: Number.isFinite(num) ? num.toFixed(4) : "-",
+      feedback: Number.isFinite(num) ? scoreFeedback(metric, num) : "-",
+    };
+  }
+
+  return { kColumns, metricRows: structuredMetricRows, rows: structuredMetricRows };
+}
+
+function buildBenchmarkSummary(rows: Array<Record<string, string>>) {
+  return rows
+    .map((row) => {
+      const metric = row.metric || row.Metric || row.METRIC || "";
+      const normalized = metric.toLowerCase();
+      if (
+        !normalized.includes("sparsity_score") &&
+        !normalized.includes("temporal_consistency")
+      ) {
+        return null;
+      }
+      if (
+        normalized.includes("p_value") ||
+        normalized.includes("position") ||
+        normalized.includes("rank_correlation")
+      ) {
+        return null;
+      }
+      const rawValue = row.value || row.Value || row.VALUE || "";
+      const num = Number(rawValue);
+      return {
+        metric,
+        label: formatBenchmarkSummaryLabel(metric),
+        value: Number.isFinite(num) ? num.toFixed(4) : "-",
+        best: bestTarget(metric),
+        feedback: Number.isFinite(num) ? scoreFeedback(metric, num) : "-",
+      };
+    })
+    .filter((row): row is { metric: string; label: string; value: string; best: string; feedback: string } => row !== null);
 }
 
 function scoreFeedback(metric: string, value: number) {
   const key = metric.toLowerCase();
+  if (key.includes("sparsity_score")) {
+    if (value >= 0.8) return "Sparse";
+    if (value >= 0.6) return "Moderately sparse";
+    if (value >= 0.3) return "Dense";
+    return "Very dense";
+  }
   if (key.includes("temporal_consistency")) {
-    if (value >= 0.7) return "Good";
-    if (value >= 0.4) return "Fair";
-    return "Weak";
+    if (value >= 0.4) return "Recent-event focus";
+    if (value <= -0.4) return "Early-event focus";
+    if (Math.abs(value) < 0.2) return "No clear temporal trend";
+    return "Mild temporal trend";
   }
   if (key.includes("jaccard") || key.includes("overlap")) {
     if (value >= 0.6) return "Good";
     if (value >= 0.4) return "Fair";
     if (value >= 0.2) return "Weak";
+    return "Poor";
+  }
+  if (key.includes("comprehensiveness")) {
+    if (value >= 1.0) return "High impact";
+    if (value >= 0.25) return "Moderate impact";
+    if (value > 0) return "Low impact";
+    return "No impact";
+  }
+  if (key.includes("sufficiency")) {
+    if (value <= 0.1) return "Good";
+    if (value <= 0.5) return "Fair";
+    if (value <= 1.0) return "Weak";
     return "Poor";
   }
   if (key.includes("correlation")) {
@@ -496,14 +1009,33 @@ function scoreFeedback(metric: string, value: number) {
 
 function bestTarget(metric: string) {
   const key = metric.toLowerCase();
+  if (key.includes("sparsity_score")) return "Higher is sparser";
   if (key.includes("jaccard") || key.includes("overlap")) return "1.0";
+  if (key.includes("temporal_consistency")) return "Context-dependent";
   if (key.includes("correlation")) return "1.0";
-  if (key.includes("temporal_consistency")) return "1.0";
   return "N/A";
+}
+
+function formatBenchmarkSummaryLabel(metric: string) {
+  const key = metric.toLowerCase();
+  if (key.includes("sparsity_score")) return "Sparsity score";
+  if (key.includes("active_fraction")) return "Active fraction";
+  if (key.includes("top3_mass_fraction")) return "Top-3 attribution mass";
+  if (key.includes("top5_mass_fraction")) return "Top-5 attribution mass";
+  if (key.includes("temporal_consistency") && key.includes("recency_correlation")) {
+    return "Temporal recency correlation";
+  }
+  return metric
+    .replace(/^(activity|event_time|remaining_time|time)_/, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function metricHelp(metric: string) {
   const key = metric.toLowerCase();
+  if (key.includes("sparsity_score")) {
+    return "Sparsity: whether the explanation concentrates importance on a small subset of nodes. Higher means a more compact explanation; 0 means the explanation is dense.";
+  }
   if (key.includes("spearman") || key.includes("pearson")) {
     return "Faithfulness: correlation between importance scores and model output change. Higher is better.";
   }
@@ -511,7 +1043,7 @@ function metricHelp(metric: string) {
     return "Agreement: overlap of top-k features between explainers. Higher is better.";
   }
   if (key.includes("temporal_consistency")) {
-    return "Temporal consistency: whether recent events are consistently more important. Higher is better.";
+    return "Temporal recency correlation: positive values mean later/recent events are more important; negative values mean earlier events are more important. This is descriptive, not always a good/bad score.";
   }
   return "Benchmark metric.";
 }

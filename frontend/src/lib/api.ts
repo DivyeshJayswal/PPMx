@@ -30,6 +30,7 @@ export type ColumnDiagnostic = {
 // -----------------------------
 export type DatasetUploadResponse = {
   dataset_id: string;
+  original_filename?: string | null;
   stored_path: string;
   raw_path?: string | null;
   preprocessed_path?: string | null;
@@ -50,6 +51,7 @@ export type DatasetUploadResponse = {
 
 export type DatasetMeta = {
   dataset_id: string;
+  original_filename?: string | null;
   stored_path: string;
   raw_path?: string | null;
   preprocessed_path?: string | null;
@@ -90,6 +92,7 @@ export type CreateRunReq = {
   model_type: "gnn" | "transformer";
   task: "next_activity" | "custom_activity" | "event_time" | "remaining_time" | "unified";
   config?: Record<string, JsonValue>;
+  explainability_config?: Record<string, JsonValue>;
   split?: { test_size: number; val_split: number };
   explainability?: JsonValue; // e.g. "none" | null | {...}
   mapping_mode?: "auto" | "manual";

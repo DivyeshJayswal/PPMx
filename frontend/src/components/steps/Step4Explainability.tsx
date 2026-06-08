@@ -3,7 +3,8 @@ import Card from "../ui/card";
 
 // NOTE: Values must match backend expectations.
 // - transformer: "lime" | "shap"
-// - gnn: "gradient" | "lime" (GraphLIME)
+// - gnn: values are preserved for API compatibility and are routed to the
+//   heterogeneous GNN explainer backend.
 // - both: "all"
 // - none: "none" (runner normalizes to null)
 export type ExplainValue = "lime" | "shap" | "gradient" | "all" | "none";
@@ -60,20 +61,20 @@ export default function Step4Explainability({
         },
         {
           value: "gradient",
-          title: "Gradient-Based",
+          title: "Local Explanation",
           description:
-            "Uses gradients to estimate which input features influence predictions most strongly.",
+            "GNNExplainer-style local explanations over heterogeneous graphs. Highlights the most important nodes and edges for a prediction.",
         },
         {
           value: "lime",
-          title: "GraphLIME",
+          title: "Global Explanation",
           description:
-            "Graph-specific local explanations. Identifies important substructures/features for a prediction.",
+            "Aggregated view-importance analysis across explained graphs. Summarizes which graph views influence decisions most overall.",
         },
         {
           value: "all",
-          title: "Both (Gradient + GraphLIME)",
-          description: "Run both methods (takes longer).",
+          title: "Both (Local + Global)",
+          description: "Run the full local and global explanation flow (takes longer).",
         },
       ];
 
@@ -139,7 +140,7 @@ export default function Step4Explainability({
         <div className="bg-brand-50 border border-brand-200 rounded-lg p-4 text-sm text-gray-700">
           <ul className="list-disc ml-5 space-y-1">
             <li>Transformer models: LIME, SHAP, both, or none</li>
-            <li>GNN models: Gradient-Based, GraphLIME, both, or none</li>
+            <li>GNN models: local, global, both, or none</li>
           </ul>
         </div>
       </Card>

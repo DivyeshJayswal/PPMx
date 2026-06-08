@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { DatasetUploadResponse, RunStatus } from "../../lib/api";
 import { artifactUrl, runLogsTextUrl } from "../../lib/api";
+import type { ExplainabilityConfig } from "./Step5ExplainabilityConfig";
 
 type ManualMapping = {
   case_id: string;
@@ -27,9 +28,9 @@ function formatExplainability(v: string | null): string {
   const s = v.toLowerCase().trim();
   if (s === "none") return "None";
   if (s === "all") return "Both";
-  if (s === "lime") return "LIME / GraphLIME";
+  if (s === "lime") return "Global Explanation";
   if (s === "shap") return "SHAP";
-  if (s === "gradient") return "Gradient-Based";
+  if (s === "gradient") return "Local Explanation";
   return v;
 }
 
@@ -43,6 +44,7 @@ type Step6ReviewProps = {
   mappingMode: "manual" | null;
   manualMapping: ManualMapping;
   configMode: "default" | "custom" | null;
+  explainabilityConfig: ExplainabilityConfig;
 
   pipelineStatus: "idle" | "running" | "completed";
   progress: number;
@@ -55,6 +57,8 @@ type Step6ReviewProps = {
   error: string | null;
 
   onStartPipeline: () => void;
+  onRerun: () => void;
+  onFinish: () => void;
   onViewResults: () => void;
 };
 
@@ -67,6 +71,7 @@ export default function Step6Review({
   mappingMode,
   manualMapping,
   configMode,
+  explainabilityConfig,
   pipelineStatus,
   progress,
   runId,
@@ -75,6 +80,8 @@ export default function Step6Review({
   logs,
   error,
   onStartPipeline,
+  onRerun,
+  onFinish,
   onViewResults,
 }: Step6ReviewProps) {
   const [renderedAt, setRenderedAt] = useState(() => Date.now());
@@ -125,6 +132,16 @@ export default function Step6Review({
           manualMapping.resource ? `, resource=${manualMapping.resource}` : ""
         })`
       : "-";
+  const usesGnnExplainability =
+    !!modelType && modelType.toLowerCase().includes("gnn") && !!explainMethod && explainMethod !== "none";
+  const prefixLabel = usesGnnExplainability
+    ? `${explainabilityConfig.min_prefix_length} to ${
+        explainabilityConfig.max_prefix_length ?? "no maximum"
+      }`
+    : "-";
+  const samplingLabel = usesGnnExplainability
+    ? `${explainabilityConfig.local_explanation_samples} local samples, ${explainabilityConfig.global_explanation_sample_percent}% global sample`
+    : "-";
 
   return (
     <div className="space-y-6 w-full">
@@ -146,6 +163,8 @@ export default function Step6Review({
           <SummaryItem label="Model Type" value={modelType ?? "-"} />
           <SummaryItem label="Prediction Task" value={formatPredictionTask(predictionTask)} />
           <SummaryItem label="Explainability" value={formatExplainability(explainMethod)} />
+          <SummaryItem label="Explainability Prefix Range" value={prefixLabel} />
+          <SummaryItem label="Explainability Sampling" value={samplingLabel} />
           <SummaryItem label="Column Mapping" value={mappingLabel} />
           <SummaryItem label="Configuration" value={configLabel} />
           <SummaryItem label="Run ID" value={runId ?? "-"} />
@@ -261,12 +280,26 @@ export default function Step6Review({
             </div>
           )}
 
-          <button
-            className="px-5 py-2 bg-green-600 text-white rounded hover:bg-green-700"
-            onClick={onViewResults}
-          >
-            View Results
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <button
+              className="px-5 py-2 bg-green-600 text-white rounded hover:bg-green-700"
+              onClick={onViewResults}
+            >
+              View Results
+            </button>
+            <button
+              className="px-5 py-2 border border-brand-300 bg-white text-brand-700 rounded hover:bg-brand-50"
+              onClick={onRerun}
+            >
+              Rerun Pipeline
+            </button>
+            <button
+              className="px-5 py-2 border border-gray-300 bg-white text-gray-700 rounded hover:bg-gray-50"
+              onClick={onFinish}
+            >
+              Finish
+            </button>
+          </div>
         </div>
       )}
     </div>

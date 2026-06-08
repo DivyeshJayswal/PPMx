@@ -379,6 +379,7 @@ export default function Step1Upload({
   const mappingComplete = validateManualMapping(manualMapping);
   const preprocessingRequired = mode === "raw";
   const splitsReady = !!dataset?.split_paths;
+  const datasetSetupLocked = isSampleLoading;
   const preprocessingLockedReason = !mappingComplete
     ? "Complete the column mapping first."
     : null;
@@ -453,13 +454,16 @@ export default function Step1Upload({
       </div>
 
       <Card>
+        <div className={datasetSetupLocked ? "pointer-events-none opacity-60" : ""}>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <button
             type="button"
             onClick={() => handleModeSelect("raw")}
+            disabled={datasetSetupLocked}
             className={[
               "border rounded-lg p-4 text-left transition",
               mode === "raw" ? "border-brand-500 ring-1 ring-brand-200" : "hover:border-gray-300",
+              datasetSetupLocked ? "cursor-not-allowed" : "",
             ].join(" ")}
           >
             <div className="font-semibold text-gray-900">1) Upload Raw Dataset</div>
@@ -468,11 +472,13 @@ export default function Step1Upload({
           <button
             type="button"
             onClick={() => handleModeSelect("preprocessed")}
+            disabled={datasetSetupLocked}
             className={[
               "border rounded-lg p-4 text-left transition",
               mode === "preprocessed"
                 ? "border-brand-500 ring-1 ring-brand-200"
                 : "hover:border-gray-300",
+              datasetSetupLocked ? "cursor-not-allowed" : "",
             ].join(" ")}
           >
             <div className="font-semibold text-gray-900">2) Upload Preprocessed Dataset</div>
@@ -481,21 +487,25 @@ export default function Step1Upload({
           <button
             type="button"
             onClick={() => handleModeSelect("skip")}
+            disabled={datasetSetupLocked}
             className={[
               "border rounded-lg p-4 text-left transition",
               mode === "skip"
                 ? "border-brand-500 ring-1 ring-brand-200"
                 : "hover:border-gray-300",
+              datasetSetupLocked ? "cursor-not-allowed" : "",
             ].join(" ")}
           >
             <div className="font-semibold text-gray-900">3) Skip (Upload Splits)</div>
             <div className="text-xs text-gray-600 mt-1">Upload train/val/test CSVs directly.</div>
           </button>
         </div>
+        </div>
       </Card>
 
       {mode && (
         <Card>
+          <div className={datasetSetupLocked ? "pointer-events-none opacity-60" : ""}>
           <div className="w-full space-y-6">
             {(mode === "raw" || mode === "preprocessed") && !dataset && (
               <div className="space-y-3">
@@ -972,6 +982,7 @@ export default function Step1Upload({
                 )}
               </div>
             )}
+          </div>
           </div>
         </Card>
       )}

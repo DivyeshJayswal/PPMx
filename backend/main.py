@@ -348,6 +348,7 @@ def _detect_original_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
 # -----------------------------------------------------------------------------
 class DatasetUploadResponse(BaseModel):
     dataset_id: str
+    original_filename: Optional[str] = None
     stored_path: str
     raw_path: Optional[str] = None
     preprocessed_path: Optional[str] = None
@@ -375,6 +376,7 @@ class SampleDatasetInfo(BaseModel):
 
 class DatasetMeta(BaseModel):
     dataset_id: str
+    original_filename: Optional[str] = None
     stored_path: str
     raw_path: Optional[str] = None
     preprocessed_path: Optional[str] = None
@@ -407,6 +409,7 @@ class RunCreateRequest(BaseModel):
     model_type: str = Field(..., description="transformer | gnn")
     task: str = Field(..., description="next_activity | custom_activity | event_time | remaining_time | unified (gnn)")
     config: Dict[str, Any] = Field(default_factory=dict)
+    explainability_config: Dict[str, Any] = Field(default_factory=dict)
     split: Dict[str, float] = Field(default_factory=lambda: {"test_size": 0.2, "val_split": 0.5})
     explainability: Optional[Any] = None
     target_column: Optional[str] = None
@@ -719,6 +722,7 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
 
     meta = DatasetMeta(
         dataset_id=dataset_id,
+        original_filename=filename,
         stored_path=stored_path,
         raw_path=raw_path,
         preprocessed_path=None,
@@ -744,6 +748,7 @@ async def upload_dataset(file: UploadFile = File(...), preprocessed: bool = Fals
 
     return DatasetUploadResponse(
         dataset_id=dataset_id,
+        original_filename=filename,
         stored_path=stored_path,
         raw_path=stored_path,
         preprocessed_path=meta.preprocessed_path,
@@ -826,6 +831,7 @@ def preprocess_dataset(dataset_id: str, options: PreprocessOptions):
 
     updated_meta = DatasetMeta(
         dataset_id=dataset_id,
+        original_filename=meta.original_filename,
         stored_path=preprocessed_path,
         raw_path=raw_path,
         preprocessed_path=preprocessed_path,
@@ -848,6 +854,7 @@ def preprocess_dataset(dataset_id: str, options: PreprocessOptions):
 
     return DatasetUploadResponse(
         dataset_id=dataset_id,
+        original_filename=meta.original_filename,
         stored_path=preprocessed_path,
         raw_path=raw_path,
         preprocessed_path=preprocessed_path,
@@ -967,6 +974,7 @@ def generate_splits(dataset_id: str, cfg: SplitConfig):
 
     updated_meta = DatasetMeta(
         dataset_id=dataset_id,
+        original_filename=meta.original_filename,
         stored_path=split_dataset_path,
         raw_path=meta.raw_path,
         preprocessed_path=meta.preprocessed_path,
@@ -989,6 +997,7 @@ def generate_splits(dataset_id: str, cfg: SplitConfig):
 
     return DatasetUploadResponse(
         dataset_id=dataset_id,
+        original_filename=meta.original_filename,
         stored_path=split_dataset_path,
         raw_path=meta.raw_path,
         preprocessed_path=meta.preprocessed_path,
@@ -1039,6 +1048,7 @@ async def upload_splits(dataset_id: str, train: UploadFile = File(...), val: Upl
 
     updated_meta = DatasetMeta(
         dataset_id=dataset_id,
+        original_filename=meta.original_filename,
         stored_path=split_dataset_path,
         raw_path=meta.raw_path,
         preprocessed_path=meta.preprocessed_path,
@@ -1061,6 +1071,7 @@ async def upload_splits(dataset_id: str, train: UploadFile = File(...), val: Upl
 
     return DatasetUploadResponse(
         dataset_id=dataset_id,
+        original_filename=meta.original_filename,
         stored_path=split_dataset_path,
         raw_path=meta.raw_path,
         preprocessed_path=meta.preprocessed_path,
@@ -1114,6 +1125,7 @@ async def upload_splits_new_dataset(train: UploadFile = File(...), val: UploadFi
 
     meta = DatasetMeta(
         dataset_id=dataset_id,
+        original_filename=train.filename or "uploaded_splits.csv",
         stored_path=split_dataset_path,
         raw_path=None,
         preprocessed_path=split_dataset_path,
@@ -1136,6 +1148,7 @@ async def upload_splits_new_dataset(train: UploadFile = File(...), val: UploadFi
 
     return DatasetUploadResponse(
         dataset_id=dataset_id,
+        original_filename=train.filename or "uploaded_splits.csv",
         stored_path=split_dataset_path,
         raw_path=None,
         preprocessed_path=split_dataset_path,
@@ -1212,6 +1225,7 @@ def create_run(req: RunCreateRequest):
         "model_type": req.model_type,
         "task": req.task,
         "config": req.config,
+        "explainability_config": req.explainability_config,
         "split": req.split,
         "explainability": req.explainability,
         "target_column": req.target_column,

@@ -905,7 +905,8 @@ def run_gnn_unified_prediction(dataset_path, output_dir, test_size, val_split, c
         vocabularies=vocabularies,
         num_samples=10,
         methods=explainability_method,
-        tasks=explain_tasks  # ← ADD THIS LINE
+        tasks=explain_tasks,
+        global_sample_percent=config.get('global_sample_percent', 0.01)
     )
     
     print("\n" + "="*70)

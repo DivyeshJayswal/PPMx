@@ -1249,7 +1249,7 @@ class ExplainabilityBenchmark:
     # 1. FAITHFULNESS METRICS
     # -------------------------------------------------------------------------
     
-    def faithfulness_correlation(self, x_seq, x_temp, attributions, k_values=[1, 3, 5, 10]):
+    def faithfulness_correlation(self, x_seq, x_temp, attributions, k_values=[5, 10, 15, 20, 25]):
         """
         Faithfulness measures if removing top-k important features changes predictions.
         Higher correlation between importance and prediction change = better faithfulness.
@@ -1320,7 +1320,7 @@ class ExplainabilityBenchmark:
             
         return results
     
-    def comprehensiveness(self, x_seq, x_temp, attributions, k_values=[1, 3, 5, 10]):
+    def comprehensiveness(self, x_seq, x_temp, attributions, k_values=[5, 10, 15, 20, 25]):
         """
         Comprehensiveness: Prediction change when removing top-k features.
         Higher = explanations capture important features.
@@ -1365,7 +1365,7 @@ class ExplainabilityBenchmark:
         
         return results
     
-    def sufficiency(self, x_seq, x_temp, attributions, k_values=[1, 3, 5, 10]):
+    def sufficiency(self, x_seq, x_temp, attributions, k_values=[5, 10, 15, 20, 25]):
         """
         Sufficiency: Prediction using ONLY top-k features.
         Lower = top features are sufficient to make prediction.
@@ -1486,7 +1486,7 @@ class ExplainabilityBenchmark:
     # 3. METHOD AGREEMENT METRICS
     # -------------------------------------------------------------------------
     
-    def method_agreement(self, shap_attributions, lime_attributions, k_values=[3, 5, 10]):
+    def method_agreement(self, shap_attributions, lime_attributions, k_values=[5, 10, 15, 20, 25]):
         """
         Agreement between SHAP and LIME on top-k important features.
         
@@ -1600,6 +1600,53 @@ class ExplainabilityBenchmark:
                 'median': float(np.median(monotonicity_scores))
             }
         }
+
+    def sparsity(self, attributions, threshold_ratio=0.05):
+        """
+        Sparsity: how concentrated attribution mass is on a small subset of features.
+
+        We report a thresholded active-feature fraction and its complement
+        (`sparsity_score`), where higher is better.
+        """
+        print("Computing Sparsity...")
+        attrs = np.asarray(attributions, dtype=float)
+        if attrs.ndim == 1:
+            attrs = attrs.reshape(1, -1)
+
+        active_fractions = []
+        mass_top3 = []
+        mass_top5 = []
+
+        for row in attrs:
+            abs_row = np.abs(np.asarray(row, dtype=float).reshape(-1))
+            if abs_row.size == 0:
+                continue
+            max_val = float(abs_row.max())
+            if max_val <= 0:
+                active_fractions.append(0.0)
+                mass_top3.append(0.0)
+                mass_top5.append(0.0)
+                continue
+
+            threshold = threshold_ratio * max_val
+            active_fraction = float(np.mean(abs_row >= threshold))
+            total_mass = float(abs_row.sum())
+            sorted_mass = np.sort(abs_row)[::-1]
+            top3_mass = float(sorted_mass[: min(3, len(sorted_mass))].sum() / total_mass) if total_mass > 0 else 0.0
+            top5_mass = float(sorted_mass[: min(5, len(sorted_mass))].sum() / total_mass) if total_mass > 0 else 0.0
+            active_fractions.append(active_fraction)
+            mass_top3.append(top3_mass)
+            mass_top5.append(top5_mass)
+
+        mean_active = float(np.mean(active_fractions)) if active_fractions else 0.0
+        return {
+            'sparsity': {
+                'active_fraction': mean_active,
+                'sparsity_score': float(1.0 - mean_active),
+                'top3_mass_fraction': float(np.mean(mass_top3)) if mass_top3 else 0.0,
+                'top5_mass_fraction': float(np.mean(mass_top5)) if mass_top5 else 0.0,
+            }
+        }
     
     # -------------------------------------------------------------------------
     # 5. TEMPORAL-SPECIFIC METRICS (for Process Mining)
@@ -1660,7 +1707,7 @@ class ExplainabilityBenchmark:
     # -------------------------------------------------------------------------
     
     def run_full_benchmark(self, x_seq, x_temp, shap_values, lime_values=None, 
-                          test_seq=None, k_values=[1, 3, 5, 10]):
+                          test_seq=None, k_values=[5, 10, 15, 20, 25]):
         """
         Run all benchmark metrics and return comprehensive results.
         
@@ -1729,7 +1776,14 @@ class ExplainabilityBenchmark:
         except Exception as e:
             print(f"[WARNING] Stability computation failed: {e}")
             results['stability'] = {'error': str(e)}
-        
+
+        # 5b. Sparsity
+        try:
+            results['sparsity'] = self.sparsity(shap_values)
+        except Exception as e:
+            print(f"[WARNING] Sparsity computation failed: {e}")
+            results['sparsity'] = {'error': str(e)}
+
         # 6. Method Agreement (if LIME available)
         if lime_values is not None:
             try:
@@ -2173,7 +2227,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
                     shap_values=shap_attr,
                     lime_values=lime_attr,
                     test_seq=bench_x_seq,
-                    k_values=[1, 3, 5, 10]
+                    k_values=[5, 10, 15, 20, 25]
                 )
                 
                 benchmark.save_results(benchmark_dir)
