@@ -243,7 +243,7 @@ def detect_and_standardize_columns(
     ]
     resource_patterns = [
         "org:resource", "Resource", "resource", "user", "User", "org:role",
-        "role", "Role", "actor", "Actor"
+        "org:group", "role", "Role", "actor", "Actor"
     ]
 
     # Case
@@ -317,7 +317,7 @@ def _detect_original_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
     ]
     resource_patterns = [
         "org:resource", "Resource", "resource", "user", "User", "org:role",
-        "role", "Role", "actor", "Actor"
+        "org:group", "role", "Role", "actor", "Actor"
     ]
 
     for col in df.columns:

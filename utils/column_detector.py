@@ -19,7 +19,8 @@ class UniversalColumnDetector:
         ],
         'resource': [
             'org:resource', 'Resource', 'resource', 'user', 'User',
-            'org:role', 'role', 'Role', 'actor', 'Actor', 'agent', 'Agent'
+            'org:role', 'org:group', 'role', 'Role', 'actor', 'Actor',
+            'agent', 'Agent'
         ]
     }
     

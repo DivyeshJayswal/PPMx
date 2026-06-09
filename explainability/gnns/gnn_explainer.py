@@ -528,11 +528,22 @@ class ProphetGNNExplainer:
         note = "Numerical values represent post-hoc explanation weights for nodes and edges in the explanation graph."
         image = plt.imread(output_path)
         height, width = image.shape[:2]
-        footer_height = 220
+        fontsize = 26
+        padding_px = 80
+
+        measure_fig = plt.figure(figsize=(1, 1), dpi=dpi)
+        measure_text = measure_fig.text(0, 0, note, fontsize=fontsize)
+        measure_fig.canvas.draw()
+        text_bbox = measure_text.get_window_extent(renderer=measure_fig.canvas.get_renderer())
+        plt.close(measure_fig)
+
+        canvas_width = max(width, int(np.ceil(text_bbox.width + padding_px)))
+        footer_height = max(220, int(np.ceil(text_bbox.height + padding_px)))
         total_height = height + footer_height
 
-        fig = plt.figure(figsize=(width / dpi, total_height / dpi), dpi=dpi, facecolor="white")
-        image_ax = fig.add_axes([0, footer_height / total_height, 1, height / total_height])
+        fig = plt.figure(figsize=(canvas_width / dpi, total_height / dpi), dpi=dpi, facecolor="white")
+        image_x = (canvas_width - width) / (2 * canvas_width)
+        image_ax = fig.add_axes([image_x, footer_height / total_height, width / canvas_width, height / total_height])
         image_ax.imshow(image)
         image_ax.set_axis_off()
 
@@ -544,7 +555,7 @@ class ProphetGNNExplainer:
             note,
             ha="center",
             va="center",
-            fontsize=26,
+            fontsize=fontsize,
             color="#334155",
             bbox={
                 "boxstyle": "round,pad=0.65",

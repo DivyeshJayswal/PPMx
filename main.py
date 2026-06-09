@@ -338,7 +338,7 @@ def detect_and_standardize_columns(df, verbose=True):
     case_patterns = ['case:id', 'case:concept:name', 'CaseID', 'case_id', 'caseid', 'Case ID', 'Case_ID']
     activity_patterns = ['concept:name', 'Activity', 'activity', 'Action', 'event', 'Event', 'task', 'Task']
     timestamp_patterns = ['time:timestamp', 'Timestamp', 'timestamp', 'time', 'Time', 'start_time', 'StartTime', 'complete_time', 'CompleteTime']
-    resource_patterns = ['org:resource', 'Resource', 'resource', 'user', 'User', 'org:role', 'role', 'Role', 'actor', 'Actor']
+    resource_patterns = ['org:resource', 'Resource', 'resource', 'user', 'User', 'org:role', 'org:group', 'role', 'Role', 'actor', 'Actor']
     
     for col in df.columns:
         if col in case_patterns and col != 'CaseID':
