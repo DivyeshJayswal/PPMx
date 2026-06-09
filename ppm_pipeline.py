@@ -368,6 +368,7 @@ def run_next_activity_prediction(
     val_split,
     config,
     explainability_method=None,
+    explainability_config=None,
     target_column=None,
     skip_auto_mapping=False,
     dataset_display_name=None,
@@ -448,7 +449,7 @@ def run_next_activity_prediction(
     metrics = predictor.evaluate(data)
     y_pred, y_pred_probs = predictor.predict(data)
     predictor.save_results(data, y_pred, y_pred_probs, output_dir)
-    predictor.plot_training_history(output_dir, task=task)
+    predictor.plot_training_history(output_dir)
     predictor.save_model(output_dir)
     _write_run_summaries(
         output_dir,
@@ -473,8 +474,12 @@ def run_next_activity_prediction(
         )
 
     if explainability_method and EXPLAINABILITY_AVAILABLE:
+        explainability_config = explainability_config or {}
         explainability_dir = os.path.join(output_dir, 'explainability')
-        explainability_samples = config.get("explainability_samples", 50)
+        explainability_samples = explainability_config.get(
+            "transformer_explanation_samples",
+            config.get("explainability_samples", 50),
+        )
         feature_config = {}
         if hasattr(predictor, "vocab_size") and predictor.vocab_size is not None:
             feature_config["vocab_size"] = predictor.vocab_size
@@ -488,7 +493,12 @@ def run_next_activity_prediction(
             methods=explainability_method,
             label_encoder=predictor.label_encoder,
             scaler=getattr(predictor, 'scaler', None),
-            feature_config=feature_config
+            feature_config=feature_config,
+            benchmark_config=explainability_config,
+            local_num_samples=explainability_config.get("local_explanation_samples") or None,
+            global_sample_percent=explainability_config.get("global_explanation_sample_percent", 100),
+            min_prefix_length=explainability_config.get("min_prefix_length") or None,
+            max_prefix_length=explainability_config.get("max_prefix_length") or None,
         )
 
     return metrics
@@ -501,6 +511,7 @@ def run_event_time_prediction(
     val_split,
     config,
     explainability_method=None,
+    explainability_config=None,
     skip_auto_mapping=False,
     dataset_display_name=None,
 ):
@@ -572,8 +583,12 @@ def run_event_time_prediction(
         )
 
     if explainability_method and EXPLAINABILITY_AVAILABLE:
+        explainability_config = explainability_config or {}
         explainability_dir = os.path.join(output_dir, 'explainability')
-        explainability_samples = config.get("explainability_samples", 50)
+        explainability_samples = explainability_config.get(
+            "transformer_explanation_samples",
+            config.get("explainability_samples", 50),
+        )
         feature_config = {}
         if hasattr(predictor, "vocab_size") and predictor.vocab_size is not None:
             feature_config["vocab_size"] = predictor.vocab_size
@@ -588,7 +603,12 @@ def run_event_time_prediction(
             label_encoder=predictor.label_encoder,
             scaler=predictor.scaler,
             feature_config=feature_config,
-            timestamps=data.get('X_time_test')
+            timestamps=data.get('X_time_test'),
+            benchmark_config=explainability_config,
+            local_num_samples=explainability_config.get("local_explanation_samples") or None,
+            global_sample_percent=explainability_config.get("global_explanation_sample_percent", 100),
+            min_prefix_length=explainability_config.get("min_prefix_length") or None,
+            max_prefix_length=explainability_config.get("max_prefix_length") or None,
         )
 
     return metrics
@@ -601,6 +621,7 @@ def run_remaining_time_prediction(
     val_split,
     config,
     explainability_method=None,
+    explainability_config=None,
     skip_auto_mapping=False,
     dataset_display_name=None,
 ):
@@ -672,8 +693,12 @@ def run_remaining_time_prediction(
         )
 
     if explainability_method and EXPLAINABILITY_AVAILABLE:
+        explainability_config = explainability_config or {}
         explainability_dir = os.path.join(output_dir, 'explainability')
-        explainability_samples = config.get("explainability_samples", 50)
+        explainability_samples = explainability_config.get(
+            "transformer_explanation_samples",
+            config.get("explainability_samples", 50),
+        )
         feature_config = {}
         if hasattr(predictor, "vocab_size") and predictor.vocab_size is not None:
             feature_config["vocab_size"] = predictor.vocab_size
@@ -688,7 +713,12 @@ def run_remaining_time_prediction(
             label_encoder=predictor.label_encoder,
             scaler=predictor.scaler,
             feature_config=feature_config,
-            timestamps=data.get('X_time_test')
+            timestamps=data.get('X_time_test'),
+            benchmark_config=explainability_config,
+            local_num_samples=explainability_config.get("local_explanation_samples") or None,
+            global_sample_percent=explainability_config.get("global_explanation_sample_percent", 100),
+            min_prefix_length=explainability_config.get("min_prefix_length") or None,
+            max_prefix_length=explainability_config.get("max_prefix_length") or None,
         )
 
     return metrics
@@ -827,6 +857,7 @@ def run_gnn_unified_prediction(
             methods=explainability_method,
             tasks=tasks_to_explain,
             global_sample_percent=explainability_config.get('global_explanation_sample_percent', 1),
+            benchmark_sample_count=explainability_config.get('benchmark_samples'),
             min_prefix_length=explainability_config.get('min_prefix_length'),
             max_prefix_length=explainability_config.get('max_prefix_length'),
         )

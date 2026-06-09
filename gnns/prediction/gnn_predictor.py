@@ -540,7 +540,9 @@ class GNNPredictor:
 
             log_parts = [
                 f"Epoch {epoch:03d}",
+                f"Train Loss: {train_loss:.4f}",
                 f"Train Acc: {train_metrics['accuracy']*100:.2f}%",
+                f"Val Loss: {val_metrics['loss']:.4f}",
                 f"Val Acc: {val_metrics['accuracy']*100:.2f}%",
             ]
             if self.task_name not in {"next_activity", "custom_activity"}:

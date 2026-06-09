@@ -2266,6 +2266,7 @@ def run_gnn_explainability(
     y_true=None,
     run_benchmark=True,
     global_sample_percent=1,
+    benchmark_sample_count=None,
     min_prefix_length=None,
     max_prefix_length=None,
 ):
@@ -2303,6 +2304,14 @@ def run_gnn_explainability(
     num_global_graphs = max(1, int(np.ceil(len(graphs) * (global_sample_percent / 100.0))))
     global_indices = _select_sample_indices(len(graphs), num_global_graphs)
     global_graphs = [graphs[i] for i in global_indices]
+    parsed_benchmark_sample_count = _to_optional_int(benchmark_sample_count)
+    if parsed_benchmark_sample_count is not None:
+        parsed_benchmark_sample_count = max(1, min(parsed_benchmark_sample_count, len(graphs)))
+        benchmark_indices = _select_sample_indices(len(graphs), parsed_benchmark_sample_count)
+        benchmark_graphs = [graphs[i] for i in benchmark_indices]
+    else:
+        benchmark_indices = global_indices
+        benchmark_graphs = list(global_graphs)
 
     for task in tasks:
         task_dir = os.path.join(output_dir, "prophet", task)
@@ -2336,7 +2345,6 @@ def run_gnn_explainability(
 
         if run_benchmark:
             benchmark_dir = os.path.join(output_dir, "benchmark")
-            benchmark_graphs = list(global_graphs)
             benchmark = GNNExplainabilityBenchmark(explainer, task=task)
             task_benchmark_results = benchmark.run_full_benchmark(benchmark_graphs, max_samples=len(benchmark_graphs))
             task_filename = f"benchmark_results_{task}.json"
@@ -2355,6 +2363,9 @@ def run_gnn_explainability(
             "max_prefix_length": applied_max_prefix,
             "num_global_graphs": len(global_graphs),
             "global_sample_percent": global_sample_percent,
+            "num_benchmark_graphs": len(benchmark_graphs),
+            "benchmark_sample_count": parsed_benchmark_sample_count,
+            "benchmark_sample_indices": benchmark_indices,
             "top_global_view": None if global_df.empty else str(global_df.iloc[0]["activity"]),
             "top_global_activity": None if global_df.empty else str(global_df.iloc[0]["activity"]),
             "benchmark_enabled": bool(run_benchmark),
@@ -2403,6 +2414,7 @@ class GNNExplainerWrapper:
         y_true=None,
         run_benchmark=True,
         global_sample_percent=1,
+        benchmark_sample_count=None,
         min_prefix_length=None,
         max_prefix_length=None,
     ):
@@ -2419,6 +2431,7 @@ class GNNExplainerWrapper:
             y_true=y_true,
             run_benchmark=run_benchmark,
             global_sample_percent=global_sample_percent,
+            benchmark_sample_count=benchmark_sample_count,
             min_prefix_length=min_prefix_length,
             max_prefix_length=max_prefix_length,
         )

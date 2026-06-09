@@ -275,6 +275,27 @@ function validateExplainabilityConfig(
 ): boolean {
   if (!method) return false;
   if (method === "none") return true;
+  if (model === "transformer") {
+    const sampleOk =
+      Number.isInteger(cfg.transformer_explanation_samples) &&
+      cfg.transformer_explanation_samples >= 1;
+    const strategyOk = ["evenly_spaced", "random", "manual", "diverse"].includes(
+      cfg.benchmark_sampling_strategy
+    );
+    const seedOk = Number.isInteger(cfg.benchmark_random_seed);
+    const protocolOk =
+      cfg.benchmark_protocol_name.trim().length > 0 &&
+      cfg.benchmark_protocol_version.trim().length > 0;
+    const manualOk =
+      cfg.benchmark_sampling_strategy !== "manual" ||
+      (cfg.benchmark_sample_indices.trim().length > 0 &&
+        cfg.benchmark_sample_indices
+          .split(",")
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .every((part) => /^\d+$/.test(part)));
+    return sampleOk && strategyOk && seedOk && protocolOk && manualOk;
+  }
   if (model !== "gnn") return true;
 
   const localOk = Number.isInteger(cfg.local_explanation_samples) && cfg.local_explanation_samples >= 0;
@@ -282,12 +303,13 @@ function validateExplainabilityConfig(
     Number.isInteger(cfg.global_explanation_sample_percent) &&
     cfg.global_explanation_sample_percent >= 1 &&
     cfg.global_explanation_sample_percent <= 100;
+  const benchmarkOk = Number.isInteger(cfg.benchmark_samples) && cfg.benchmark_samples >= 1;
   const minOk = Number.isInteger(cfg.min_prefix_length) && cfg.min_prefix_length >= 1;
   const maxOk =
     cfg.max_prefix_length === null ||
     (Number.isInteger(cfg.max_prefix_length) && cfg.max_prefix_length >= cfg.min_prefix_length);
 
-  return localOk && globalOk && minOk && maxOk;
+  return localOk && globalOk && benchmarkOk && minOk && maxOk;
 }
 
 export default function WizardLayout() {
@@ -347,8 +369,17 @@ export default function WizardLayout() {
     () => ({
       local_explanation_samples: 5,
       global_explanation_sample_percent: 1,
+      benchmark_samples: 10,
       min_prefix_length: 1,
       max_prefix_length: null,
+      transformer_explanation_samples: 50,
+      benchmark_sampling_strategy: "evenly_spaced",
+      benchmark_random_seed: 42,
+      benchmark_sample_indices: "",
+      benchmark_protocol_name: "Perturbation-Based Explainability Benchmark",
+      benchmark_protocol_version: "1.0",
+      benchmark_protocol_notes:
+        "Fixed sampling protocol with zero masking and k-values 5, 10, 15, 20, 25.",
     }),
     []
   );
@@ -612,7 +643,7 @@ export default function WizardLayout() {
         ? gnnConfig
         : defaultGnnConfig;
     const explainabilityConfigToSend =
-      mt === "gnn" && explainToSend && explainToSend !== "none"
+      explainToSend && explainToSend !== "none"
         ? explainabilityConfig
         : defaultExplainabilityConfig;
 

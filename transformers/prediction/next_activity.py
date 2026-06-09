@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import os
 
 from ..model import build_next_activity_model
+from .training_logger import EpochMetricsLogger
 
 
 class NextActivityPredictor:
@@ -194,13 +195,15 @@ class NextActivityPredictor:
             verbose=1
         )
         
+        epoch_logger = EpochMetricsLogger()
+
         self.history = self.model.fit(
             data['X_train'], data['y_train'],
             validation_data=(data['X_val'], data['y_val']),
             epochs=epochs,
             batch_size=batch_size,
-            callbacks=[early_stopping],
-            verbose=1
+            callbacks=[epoch_logger, early_stopping],
+            verbose=0
         )
         
         print("\nTraining completed!")

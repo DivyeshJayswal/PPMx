@@ -800,14 +800,13 @@ function BenchmarkSection({
   if (!headers.length || !rows.length) return null;
 
   const benchmarkTable = buildBenchmarkMatrix(rows);
-  const summaryMetrics = buildBenchmarkSummary(rows);
-  if (!benchmarkTable.rows.length && !summaryMetrics.length) return null;
+  if (!benchmarkTable.rows.length) return null;
 
   return (
     <section className="space-y-3">
       <div className="text-sm font-semibold text-brand-900">Benchmark</div>
       <div className="text-xs text-brand-600">
-        Columns are k-values. Missing metrics are shown as "-", usually because too few valid samples exist for that k.
+        Columns are k-values. Each cell shows the metric value and n=valid_sample_count.
       </div>
       {benchmarkTable.rows.length ? (
         <div className="overflow-auto border border-brand-100 rounded-lg bg-white">
@@ -839,36 +838,12 @@ function BenchmarkSection({
                     return (
                       <td key={`${row.metricKey}-${k}`} className="px-3 py-2 border-b border-brand-100 text-gray-700 align-top">
                         <div>{cell?.value ?? "-"}</div>
-                        <div className="text-xs text-gray-500">{cell?.feedback ?? "-"}</div>
+                        <div className="text-xs text-gray-500">
+                          {cell?.validSampleCount ? `n=${cell.validSampleCount}` : "n=-"}
+                        </div>
                       </td>
                     );
                   })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-      {summaryMetrics.length ? (
-        <div className="overflow-auto border border-brand-100 rounded-lg bg-white">
-          <table className="min-w-full text-sm">
-            <thead className="bg-brand-50 text-brand-800">
-              <tr>
-                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Summary metric</th>
-                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Value</th>
-                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Best</th>
-                <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Feedback</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summaryMetrics.map((row) => (
-                <tr key={row.metric} className="odd:bg-white even:bg-brand-50/40">
-                  <td className="px-3 py-2 border-b border-brand-100 text-gray-700" title={metricHelp(row.metric)}>
-                    {row.label}
-                  </td>
-                  <td className="px-3 py-2 border-b border-brand-100 text-gray-700">{row.value}</td>
-                  <td className="px-3 py-2 border-b border-brand-100 text-gray-700">{row.best}</td>
-                  <td className="px-3 py-2 border-b border-brand-100 text-gray-700">{row.feedback}</td>
                 </tr>
               ))}
             </tbody>
@@ -895,7 +870,7 @@ function buildBenchmarkMatrix(rows: Array<Record<string, string>>) {
     label: metric.label,
     values: Object.fromEntries(kColumns.map((k) => [k, null])) as Record<
       string,
-      { value: string; feedback: string } | null
+      { value: string; validSampleCount: string | null } | null
     >,
   }));
 
@@ -907,6 +882,30 @@ function buildBenchmarkMatrix(rows: Array<Record<string, string>>) {
     if (!kMatch) continue;
     const kKey = kMatch[1];
     if (!kColumns.includes(kKey)) continue;
+
+    const validCountTargets =
+      metric.includes("valid_sample_count") && metric.includes("faithfulness")
+        ? ["spearman_correlation", "pearson_correlation"]
+        : metric.includes("valid_sample_count") && metric.includes("comprehensiveness")
+          ? ["comprehensiveness_mean"]
+          : metric.includes("valid_sample_count") && metric.includes("sufficiency")
+            ? ["sufficiency_mean"]
+            : metric.includes("valid_sample_count") && metric.includes("agreement")
+              ? ["jaccard_similarity", "top_k_overlap"]
+              : [];
+
+    if (validCountTargets.length) {
+      for (const targetKey of validCountTargets) {
+        const targetMetricRow = structuredMetricRows.find((entry) => entry.metricKey === targetKey);
+        if (!targetMetricRow) continue;
+        const currentCell = targetMetricRow.values[kKey] ?? { value: "-", validSampleCount: null };
+        targetMetricRow.values[kKey] = {
+          ...currentCell,
+          validSampleCount: Number.isFinite(num) ? String(Math.trunc(num)) : "-",
+        };
+      }
+      continue;
+    }
 
     const resolvedColumn =
       metric.includes("spearman_correlation")
@@ -926,109 +925,14 @@ function buildBenchmarkMatrix(rows: Array<Record<string, string>>) {
     if (!resolvedColumn) continue;
     const targetMetricRow = structuredMetricRows.find((entry) => entry.metricKey === resolvedColumn);
     if (!targetMetricRow) continue;
+    const currentCell = targetMetricRow.values[kKey] ?? { value: "-", validSampleCount: null };
     targetMetricRow.values[kKey] = {
+      ...currentCell,
       value: Number.isFinite(num) ? num.toFixed(4) : "-",
-      feedback: Number.isFinite(num) ? scoreFeedback(metric, num) : "-",
     };
   }
 
   return { kColumns, metricRows: structuredMetricRows, rows: structuredMetricRows };
-}
-
-function buildBenchmarkSummary(rows: Array<Record<string, string>>) {
-  return rows
-    .map((row) => {
-      const metric = row.metric || row.Metric || row.METRIC || "";
-      const normalized = metric.toLowerCase();
-      if (
-        !normalized.includes("sparsity_score") &&
-        !normalized.includes("temporal_consistency")
-      ) {
-        return null;
-      }
-      if (
-        normalized.includes("p_value") ||
-        normalized.includes("position") ||
-        normalized.includes("rank_correlation")
-      ) {
-        return null;
-      }
-      const rawValue = row.value || row.Value || row.VALUE || "";
-      const num = Number(rawValue);
-      return {
-        metric,
-        label: formatBenchmarkSummaryLabel(metric),
-        value: Number.isFinite(num) ? num.toFixed(4) : "-",
-        best: bestTarget(metric),
-        feedback: Number.isFinite(num) ? scoreFeedback(metric, num) : "-",
-      };
-    })
-    .filter((row): row is { metric: string; label: string; value: string; best: string; feedback: string } => row !== null);
-}
-
-function scoreFeedback(metric: string, value: number) {
-  const key = metric.toLowerCase();
-  if (key.includes("sparsity_score")) {
-    if (value >= 0.8) return "Sparse";
-    if (value >= 0.6) return "Moderately sparse";
-    if (value >= 0.3) return "Dense";
-    return "Very dense";
-  }
-  if (key.includes("temporal_consistency")) {
-    if (value >= 0.4) return "Recent-event focus";
-    if (value <= -0.4) return "Early-event focus";
-    if (Math.abs(value) < 0.2) return "No clear temporal trend";
-    return "Mild temporal trend";
-  }
-  if (key.includes("jaccard") || key.includes("overlap")) {
-    if (value >= 0.6) return "Good";
-    if (value >= 0.4) return "Fair";
-    if (value >= 0.2) return "Weak";
-    return "Poor";
-  }
-  if (key.includes("comprehensiveness")) {
-    if (value >= 1.0) return "High impact";
-    if (value >= 0.25) return "Moderate impact";
-    if (value > 0) return "Low impact";
-    return "No impact";
-  }
-  if (key.includes("sufficiency")) {
-    if (value <= 0.1) return "Good";
-    if (value <= 0.5) return "Fair";
-    if (value <= 1.0) return "Weak";
-    return "Poor";
-  }
-  if (key.includes("correlation")) {
-    if (value >= 0.5) return "Good";
-    if (value >= 0.2) return "Fair";
-    if (value >= 0) return "Weak";
-    return "Poor";
-  }
-  return "N/A";
-}
-
-function bestTarget(metric: string) {
-  const key = metric.toLowerCase();
-  if (key.includes("sparsity_score")) return "Higher is sparser";
-  if (key.includes("jaccard") || key.includes("overlap")) return "1.0";
-  if (key.includes("temporal_consistency")) return "Context-dependent";
-  if (key.includes("correlation")) return "1.0";
-  return "N/A";
-}
-
-function formatBenchmarkSummaryLabel(metric: string) {
-  const key = metric.toLowerCase();
-  if (key.includes("sparsity_score")) return "Sparsity score";
-  if (key.includes("active_fraction")) return "Active fraction";
-  if (key.includes("top3_mass_fraction")) return "Top-3 attribution mass";
-  if (key.includes("top5_mass_fraction")) return "Top-5 attribution mass";
-  if (key.includes("temporal_consistency") && key.includes("recency_correlation")) {
-    return "Temporal recency correlation";
-  }
-  return metric
-    .replace(/^(activity|event_time|remaining_time|time)_/, "")
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function metricHelp(metric: string) {

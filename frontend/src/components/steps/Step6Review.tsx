@@ -134,13 +134,17 @@ export default function Step6Review({
       : "-";
   const usesGnnExplainability =
     !!modelType && modelType.toLowerCase().includes("gnn") && !!explainMethod && explainMethod !== "none";
+  const usesTransformerExplainability =
+    !!modelType && modelType.toLowerCase().includes("transformer") && !!explainMethod && explainMethod !== "none";
   const prefixLabel = usesGnnExplainability
     ? `${explainabilityConfig.min_prefix_length} to ${
         explainabilityConfig.max_prefix_length ?? "no maximum"
       }`
     : "-";
   const samplingLabel = usesGnnExplainability
-    ? `${explainabilityConfig.local_explanation_samples} local samples, ${explainabilityConfig.global_explanation_sample_percent}% global sample`
+    ? `${explainabilityConfig.local_explanation_samples} local samples, ${explainabilityConfig.global_explanation_sample_percent}% global sample, ${explainabilityConfig.benchmark_samples} benchmark samples`
+    : usesTransformerExplainability
+    ? `${explainabilityConfig.transformer_explanation_samples} samples, ${explainabilityConfig.benchmark_sampling_strategy} sampling, seed ${explainabilityConfig.benchmark_random_seed}`
     : "-";
 
   return (

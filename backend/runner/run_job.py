@@ -233,6 +233,7 @@ def main():
                     val_split,
                     config,
                     explainability_method=explainability,
+                    explainability_config=explainability_config,
                     target_column=target_column if task == "custom_activity" else None,
                     skip_auto_mapping=skip_auto_mapping,
                     dataset_display_name=dataset_display_name,
@@ -241,6 +242,7 @@ def main():
                 metrics = run_event_time_prediction(
                     dataset_path, artifacts_dir, test_size, val_split, config,
                     explainability_method=explainability,
+                    explainability_config=explainability_config,
                     skip_auto_mapping=skip_auto_mapping,
                     dataset_display_name=dataset_display_name,
                 )
@@ -248,6 +250,7 @@ def main():
                 metrics = run_remaining_time_prediction(
                     dataset_path, artifacts_dir, test_size, val_split, config,
                     explainability_method=explainability,
+                    explainability_config=explainability_config,
                     skip_auto_mapping=skip_auto_mapping,
                     dataset_display_name=dataset_display_name,
                 )
