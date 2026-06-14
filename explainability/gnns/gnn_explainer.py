@@ -1686,11 +1686,11 @@ class GraphLIMEExplainer(ProphetGNNExplainer):
     pass
 
 
-class GNNExplainabilityBenchmark:
+class GNNExplainabilityEvaluation:
     """
-    Lightweight benchmark for heterogeneous GNN explanations.
+    Lightweight evaluation for heterogeneous GNN explanations.
 
-    The benchmark evaluates activity-node attributions because they are the most
+    The evaluation uses activity-node attributions because they are the most
     stable, comparable sequence-aligned signal across graphs and tasks.
     """
 
@@ -1778,7 +1778,7 @@ class GNNExplainabilityBenchmark:
         node_mask = node_mask.detach().cpu().numpy()
         return np.abs(node_mask).mean(axis=1) if node_mask.ndim > 1 else np.abs(node_mask)
 
-    def _extract_benchmark_attributions(self, graph):
+    def _extract_evaluation_attributions(self, graph):
         explanation, _ = self.explainer.explain_graph(graph)
         node_mask = getattr(explanation["activity"], "node_mask", None)
         if node_mask is None:
@@ -1808,8 +1808,8 @@ class GNNExplainabilityBenchmark:
 
     def _collect_samples(self, graphs, max_samples=10):
         samples = []
-        for graph in tqdm(graphs[:max_samples], desc="Collecting benchmark samples"):
-            attr, edge_attr = self._extract_benchmark_attributions(graph)
+        for graph in tqdm(graphs[:max_samples], desc="Collecting evaluation samples"):
+            attr, edge_attr = self._extract_evaluation_attributions(graph)
             if attr is None or len(attr) == 0:
                 continue
             samples.append(
@@ -2096,9 +2096,9 @@ class GNNExplainabilityBenchmark:
             }
         }
 
-    def run_full_benchmark(self, graphs, k_values=(5, 10, 15, 20, 25), max_samples=10):
+    def run_full_evaluation(self, graphs, k_values=(5, 10, 15, 20, 25), max_samples=10):
         print("\n" + "=" * 60)
-        print("GNN EXPLAINABILITY BENCHMARK EVALUATION")
+        print("GNN EXPLAINABILITY EVALUATION")
         print("=" * 60)
         samples = self._collect_samples(graphs, max_samples=max_samples)
         results = {
@@ -2119,12 +2119,12 @@ class GNNExplainabilityBenchmark:
         self.results = results
         return results
 
-    def save_results(self, output_dir, filename="benchmark_results.json"):
+    def save_results(self, output_dir, filename="evaluation_results.json"):
         os.makedirs(output_dir, exist_ok=True)
         filepath = os.path.join(output_dir, filename)
         with open(filepath, "w", encoding="utf-8") as handle:
             json.dump(self.results, handle, indent=2, default=_serialize_scalar)
-        print(f"[OK] Benchmark results saved to: {filepath}")
+        print(f"[OK] Evaluation results saved to: {filepath}")
 
         summary_rows = []
         task_name = self.results.get("metadata", {}).get("task", self.task)
@@ -2152,9 +2152,9 @@ class GNNExplainabilityBenchmark:
                     )
 
         summary_df = pd.DataFrame(summary_rows)
-        summary_path = os.path.join(output_dir, "benchmark_summary.csv")
+        summary_path = os.path.join(output_dir, "evaluation_summary.csv")
         summary_df.to_csv(summary_path, index=False)
-        print(f"[OK] Benchmark summary saved to: {summary_path}")
+        print(f"[OK] Evaluation summary saved to: {summary_path}")
         return filepath, summary_df
 
 
@@ -2275,9 +2275,9 @@ def run_gnn_explainability(
     tasks=None,
     scaler=None,
     y_true=None,
-    run_benchmark=True,
+    run_evaluation=True,
     global_sample_percent=1,
-    benchmark_sample_count=None,
+    evaluation_sample_count=None,
     min_prefix_length=None,
     max_prefix_length=None,
 ):
@@ -2305,8 +2305,8 @@ def run_gnn_explainability(
         tasks = [tasks]
 
     summary = {}
-    benchmark_results = {}
-    benchmark_frames = []
+    evaluation_results = {}
+    evaluation_frames = []
     local_num_samples = max(0, int(local_num_samples))
     sample_indices = _select_sample_indices(len(graphs), local_num_samples)
     
@@ -2315,14 +2315,14 @@ def run_gnn_explainability(
     num_global_graphs = max(1, int(np.ceil(len(graphs) * (global_sample_percent / 100.0))))
     global_indices = _select_sample_indices(len(graphs), num_global_graphs)
     global_graphs = [graphs[i] for i in global_indices]
-    parsed_benchmark_sample_count = _to_optional_int(benchmark_sample_count)
-    if parsed_benchmark_sample_count is not None:
-        parsed_benchmark_sample_count = max(1, min(parsed_benchmark_sample_count, len(graphs)))
-        benchmark_indices = _select_sample_indices(len(graphs), parsed_benchmark_sample_count)
-        benchmark_graphs = [graphs[i] for i in benchmark_indices]
+    parsed_evaluation_sample_count = _to_optional_int(evaluation_sample_count)
+    if parsed_evaluation_sample_count is not None:
+        parsed_evaluation_sample_count = max(1, min(parsed_evaluation_sample_count, len(graphs)))
+        evaluation_indices = _select_sample_indices(len(graphs), parsed_evaluation_sample_count)
+        evaluation_graphs = [graphs[i] for i in evaluation_indices]
     else:
-        benchmark_indices = global_indices
-        benchmark_graphs = list(global_graphs)
+        evaluation_indices = global_indices
+        evaluation_graphs = list(global_graphs)
 
     for task in tasks:
         task_dir = os.path.join(output_dir, "prophet", task)
@@ -2354,17 +2354,17 @@ def run_gnn_explainability(
         global_df = explainer.global_view_importance(global_graphs)
         explainer.save_global_artifacts(global_df, global_dir, len(global_graphs))
 
-        if run_benchmark:
-            benchmark_dir = os.path.join(output_dir, "benchmark")
-            benchmark = GNNExplainabilityBenchmark(explainer, task=task)
-            task_benchmark_results = benchmark.run_full_benchmark(benchmark_graphs, max_samples=len(benchmark_graphs))
-            task_filename = f"benchmark_results_{task}.json"
-            _, task_summary_df = benchmark.save_results(benchmark_dir, filename=task_filename)
-            benchmark_results[task] = task_benchmark_results
+        if run_evaluation:
+            evaluation_dir = os.path.join(output_dir, "evaluation")
+            evaluation = GNNExplainabilityEvaluation(explainer, task=task)
+            task_evaluation_results = evaluation.run_full_evaluation(evaluation_graphs, max_samples=len(evaluation_graphs))
+            task_filename = f"evaluation_results_{task}.json"
+            _, task_summary_df = evaluation.save_results(evaluation_dir, filename=task_filename)
+            evaluation_results[task] = task_evaluation_results
             if not task_summary_df.empty:
                 task_summary_df = task_summary_df.copy()
                 task_summary_df["task"] = task
-                benchmark_frames.append(task_summary_df)
+                evaluation_frames.append(task_summary_df)
 
         summary[task] = {
             "sample_indices": sample_indices,
@@ -2374,29 +2374,29 @@ def run_gnn_explainability(
             "max_prefix_length": applied_max_prefix,
             "num_global_graphs": len(global_graphs),
             "global_sample_percent": global_sample_percent,
-            "num_benchmark_graphs": len(benchmark_graphs),
-            "benchmark_sample_count": parsed_benchmark_sample_count,
-            "benchmark_sample_indices": benchmark_indices,
+            "num_evaluation_graphs": len(evaluation_graphs),
+            "evaluation_sample_count": parsed_evaluation_sample_count,
+            "evaluation_sample_indices": evaluation_indices,
             "top_global_view": None if global_df.empty else str(global_df.iloc[0]["activity"]),
             "top_global_activity": None if global_df.empty else str(global_df.iloc[0]["activity"]),
-            "benchmark_enabled": bool(run_benchmark),
+            "evaluation_enabled": bool(run_evaluation),
         }
 
     summary_path = os.path.join(output_dir, "prophet_summary.json")
     with open(summary_path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, default=_serialize_scalar)
 
-    if run_benchmark and benchmark_results:
-        benchmark_dir = os.path.join(output_dir, "benchmark")
-        os.makedirs(benchmark_dir, exist_ok=True)
-        combined_json_path = os.path.join(benchmark_dir, "benchmark_results.json")
+    if run_evaluation and evaluation_results:
+        evaluation_dir = os.path.join(output_dir, "evaluation")
+        os.makedirs(evaluation_dir, exist_ok=True)
+        combined_json_path = os.path.join(evaluation_dir, "evaluation_results.json")
         with open(combined_json_path, "w", encoding="utf-8") as handle:
-            json.dump(benchmark_results, handle, indent=2, default=_serialize_scalar)
-        if benchmark_frames:
-            combined_df = pd.concat(benchmark_frames, ignore_index=True)
-            combined_df.to_csv(os.path.join(benchmark_dir, "benchmark_summary.csv"), index=False)
-            print(f"[OK] Combined benchmark summary saved to: {os.path.join(benchmark_dir, 'benchmark_summary.csv')}")
-        print(f"[OK] Combined benchmark results saved to: {combined_json_path}")
+            json.dump(evaluation_results, handle, indent=2, default=_serialize_scalar)
+        if evaluation_frames:
+            combined_df = pd.concat(evaluation_frames, ignore_index=True)
+            combined_df.to_csv(os.path.join(evaluation_dir, "evaluation_summary.csv"), index=False)
+            print(f"[OK] Combined evaluation summary saved to: {os.path.join(evaluation_dir, 'evaluation_summary.csv')}")
+        print(f"[OK] Combined evaluation results saved to: {combined_json_path}")
 
     prophet_root = os.path.join(output_dir, "prophet")
     if local_num_samples > 0 and not _dir_has_png(os.path.join(prophet_root, tasks[0], "local")):
@@ -2423,9 +2423,9 @@ class GNNExplainerWrapper:
         methods="all",
         tasks=None,
         y_true=None,
-        run_benchmark=True,
+        run_evaluation=True,
         global_sample_percent=1,
-        benchmark_sample_count=None,
+        evaluation_sample_count=None,
         min_prefix_length=None,
         max_prefix_length=None,
     ):
@@ -2440,9 +2440,9 @@ class GNNExplainerWrapper:
             methods=methods,
             tasks=tasks,
             y_true=y_true,
-            run_benchmark=run_benchmark,
+            run_evaluation=run_evaluation,
             global_sample_percent=global_sample_percent,
-            benchmark_sample_count=benchmark_sample_count,
+            evaluation_sample_count=evaluation_sample_count,
             min_prefix_length=min_prefix_length,
             max_prefix_length=max_prefix_length,
         )

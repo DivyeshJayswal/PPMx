@@ -1592,9 +1592,9 @@ def _select_protocol_sample_indices(data, task, test_size, requested_count, conf
     config = config or {}
     requested_count = int(requested_count) if requested_count is not None else 50
     requested_count = max(1, min(requested_count, pool_size)) if pool_size > 0 else 0
-    strategy = str(config.get("benchmark_sampling_strategy", "evenly_spaced") or "evenly_spaced").strip().lower()
-    seed = int(config.get("benchmark_random_seed", 42) or 42)
-    manual_indices = _parse_sample_indices(config.get("benchmark_sample_indices"))
+    strategy = str(config.get("evaluation_sampling_strategy", "evenly_spaced") or "evenly_spaced").strip().lower()
+    seed = int(config.get("evaluation_random_seed", 42) or 42)
+    manual_indices = _parse_sample_indices(config.get("evaluation_sample_indices"))
 
     if pool_size <= 0:
         return [], strategy, seed, manual_indices
@@ -1672,12 +1672,12 @@ def _validate_explainability_coverage(task, label_encoder, shap_dir=None, lime_d
 
 
 # =============================================================================
-# EXPLAINABILITY BENCHMARK METRICS
+# EXPLAINABILITY EVALUATION METRICS
 # =============================================================================
 
-class ExplainabilityBenchmark:
+class ExplainabilityEvaluation:
     """
-    Comprehensive benchmark metrics for evaluating and comparing explainability methods.
+    Comprehensive evaluation metrics for evaluating and comparing explainability methods.
     
     Metrics implemented:
     1. Faithfulness - Do top features actually impact predictions?
@@ -2297,13 +2297,13 @@ class ExplainabilityBenchmark:
         }
     
     # -------------------------------------------------------------------------
-    # MAIN BENCHMARK RUNNER
+    # MAIN EVALUATION RUNNER
     # -------------------------------------------------------------------------
     
-    def run_full_benchmark(self, x_seq, x_temp, shap_values, lime_values=None, 
+    def run_full_evaluation(self, x_seq, x_temp, shap_values, lime_values=None,
                           test_seq=None, k_values=[5, 10, 15, 20, 25]):
         """
-        Run all benchmark metrics and return comprehensive results.
+        Run all evaluation metrics and return comprehensive results.
         
         Args:
             x_seq: Test sequences (n_samples, seq_len)
@@ -2314,10 +2314,10 @@ class ExplainabilityBenchmark:
             k_values: List of k values for top-k metrics
             
         Returns:
-            Dictionary with all benchmark results
+            Dictionary with all evaluation results
         """
         print("\n" + "="*60)
-        print("EXPLAINABILITY BENCHMARK EVALUATION")
+        print("EXPLAINABILITY EVALUATION")
         print("="*60)
         
         results = {
@@ -2410,14 +2410,14 @@ class ExplainabilityBenchmark:
         self.results = results
         return results
     
-    def save_results(self, output_dir, filename='benchmark_results.json'):
-        """Save benchmark results to JSON file."""
+    def save_results(self, output_dir, filename='evaluation_results.json'):
+        """Save evaluation results to JSON file."""
         import json
         
         filepath = os.path.join(output_dir, filename)
         with open(filepath, 'w') as f:
             json.dump(self.results, f, indent=2, default=str)
-        print(f"[OK] Benchmark results saved to: {filepath}")
+        print(f"[OK] Evaluation results saved to: {filepath}")
         
         # Also save a summary CSV for easy comparison
         summary_rows = []
@@ -2445,20 +2445,20 @@ class ExplainabilityBenchmark:
         
         if summary_rows:
             summary_df = pd.DataFrame(summary_rows)
-            summary_path = os.path.join(output_dir, 'benchmark_summary.csv')
+            summary_path = os.path.join(output_dir, 'evaluation_summary.csv')
             summary_df.to_csv(summary_path, index=False)
-            print(f"[OK] Benchmark summary saved to: {summary_path}")
+            print(f"[OK] Evaluation summary saved to: {summary_path}")
         
         return filepath
     
     def print_summary(self):
-        """Print a human-readable summary of benchmark results."""
+        """Print a human-readable summary of evaluation results."""
         if not self.results:
-            print("No benchmark results available.")
+            print("No evaluation results available.")
             return
         
         print("\n" + "="*60)
-        print("BENCHMARK SUMMARY")
+        print("EVALUATION SUMMARY")
         print("="*60)
         
         # Faithfulness
@@ -2511,9 +2511,9 @@ class ExplainabilityBenchmark:
         print("\n" + "="*60)
 
 
-def run_transformer_explainability(model, data, output_dir, task='activity', num_samples=50, methods='all', label_encoder=None, scaler=None, timestamps=None, feature_config=None, run_benchmark=True, benchmark_config=None, local_num_samples=None, global_sample_percent=100, min_prefix_length=None, max_prefix_length=None):
+def run_transformer_explainability(model, data, output_dir, task='activity', num_samples=50, methods='all', label_encoder=None, scaler=None, timestamps=None, feature_config=None, run_evaluation=True, evaluation_config=None, local_num_samples=None, global_sample_percent=100, min_prefix_length=None, max_prefix_length=None):
     os.makedirs(output_dir, exist_ok=True)
-    benchmark_config = benchmark_config or {}
+    evaluation_config = evaluation_config or {}
     k_values = [5, 10, 15, 20, 25]
     
     # Initialize explainer references
@@ -2540,7 +2540,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         train_data = data['X_train']
         test_data = data['X_test']
         num_classes = len(np.unique(data['y_train']))
-        if not benchmark_config and num_samples < num_classes:
+        if not evaluation_config and num_samples < num_classes:
             print(f"[WARNING] num_samples={num_samples} < num_classes={num_classes}. Increasing for full coverage.")
             num_samples = num_classes
         test_size = len(test_data)
@@ -2564,13 +2564,13 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
     global_count = max(1, int(pool_size * pct / 100))
 
     # Local (LIME): absolute count; falls back to legacy num_samples.
-    local_count_raw = local_num_samples if local_num_samples is not None else int(benchmark_config.get("transformer_explanation_samples", num_samples) or num_samples)
+    local_count_raw = local_num_samples if local_num_samples is not None else int(evaluation_config.get("transformer_explanation_samples", num_samples) or num_samples)
     local_count = max(1, min(int(local_count_raw), pool_size))
 
-    # Benchmark: separate count from config, else match local.
-    bench_count_raw = benchmark_config.get("benchmark_samples", None)
-    bench_count = int(bench_count_raw) if bench_count_raw is not None else local_count
-    bench_count = max(1, min(bench_count, pool_size))
+    # Evaluation: separate count from config, else match local.
+    evaluation_count_raw = evaluation_config.get("evaluation_samples", None)
+    evaluation_count = int(evaluation_count_raw) if evaluation_count_raw is not None else local_count
+    evaluation_count = max(1, min(evaluation_count, pool_size))
 
     # Select global (SHAP/aggregation) indices within the valid pool.
     sample_indices, sampling_strategy, random_seed, requested_manual_indices = _select_protocol_sample_indices(
@@ -2578,7 +2578,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         task,
         test_size,
         global_count,
-        config=benchmark_config,
+        config=evaluation_config,
         label_encoder=label_encoder,
         valid_pool=valid_pool,
     )
@@ -2589,7 +2589,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         task,
         test_size,
         local_count,
-        config=benchmark_config,
+        config=evaluation_config,
         label_encoder=label_encoder,
         valid_pool=valid_pool,
     )
@@ -2597,13 +2597,13 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
     if not sample_indices and not lime_sample_indices:
         raise RuntimeError(
             "Transformer explainability protocol selected no valid test samples. "
-            "Check benchmark_sample_indices or sampling configuration."
+            "Check evaluation_sample_indices or sampling configuration."
         )
     num_samples = len(sample_indices)
-    benchmark_protocol = {
-        "name": benchmark_config.get("benchmark_protocol_name") or "Perturbation-Based Explainability Benchmark",
-        "version": benchmark_config.get("benchmark_protocol_version") or "1.0",
-        "notes": benchmark_config.get("benchmark_protocol_notes") or "",
+    evaluation_protocol = {
+        "name": evaluation_config.get("evaluation_protocol_name") or "Perturbation-Based Explainability Evaluation",
+        "version": evaluation_config.get("evaluation_protocol_version") or "1.0",
+        "notes": evaluation_config.get("evaluation_protocol_notes") or "",
         "model_family": "transformer",
         "task": task,
         "sampling_strategy": sampling_strategy,
@@ -2616,7 +2616,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         "requested_local_sample_count": local_count,
         "actual_global_sample_count": int(num_samples),
         "actual_local_sample_count": int(len(lime_sample_indices)),
-        "requested_sample_count": int(benchmark_config.get("transformer_explanation_samples", num_samples) or num_samples),
+        "requested_sample_count": int(evaluation_config.get("transformer_explanation_samples", num_samples) or num_samples),
         "actual_sample_count": int(num_samples),
         "test_size": int(test_size),
         "requested_manual_sample_indices": requested_manual_indices,
@@ -2627,7 +2627,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         "top_k_policy": "exclude samples with fewer than k valid non-padding positions",
         "prediction_change": "classification target probability drop" if task == "activity" else "absolute regression output difference",
         "shap_output_policy": "predicted target class for activity classification; scalar output for regression tasks",
-        "lime_feature_policy": "sequence positions are categorical token features; plots and benchmark extraction use LIME local feature indices mapped to the actual sample activity",
+        "lime_feature_policy": "sequence positions are categorical token features; plots and evaluation extraction use LIME local feature indices mapped to the actual sample activity",
         "metrics": [
             "faithfulness_correlation",
             "comprehensiveness",
@@ -2650,8 +2650,8 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
             else:
                 se = SHAPExplainer(model, task, label_encoder, scaler, random_seed=random_seed)
             se.initialize_explainer(train_data)
-            benchmark_protocol["shap_background_random_seed"] = int(random_seed)
-            benchmark_protocol["shap_background_indices"] = getattr(se, "background_indices", None)
+            evaluation_protocol["shap_background_random_seed"] = int(random_seed)
+            evaluation_protocol["shap_background_indices"] = getattr(se, "background_indices", None)
             shap_indices = sample_indices
             se.explain_samples(test_data, num_samples, indices=shap_indices)
             se.plot_bar(shap_dir)
@@ -2740,17 +2740,17 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         )
     
     # -------------------------------------------------------------------------
-    # RUN BENCHMARK EVALUATION
+    # RUN EVALUATION
     # -------------------------------------------------------------------------
-    benchmark_results = None
-    if run_benchmark and methods in ['shap', 'all']:
-        print("\n--- Running Benchmark Evaluation ---")
-        benchmark_dir = os.path.join(output_dir, 'benchmark')
-        os.makedirs(benchmark_dir, exist_ok=True)
-        protocol_path = os.path.join(benchmark_dir, 'benchmark_protocol.json')
+    evaluation_results = None
+    if run_evaluation and methods in ['shap', 'all']:
+        print("\n--- Running Evaluation ---")
+        evaluation_dir = os.path.join(output_dir, 'evaluation')
+        os.makedirs(evaluation_dir, exist_ok=True)
+        protocol_path = os.path.join(evaluation_dir, 'evaluation_protocol.json')
         with open(protocol_path, 'w', encoding='utf-8') as f:
-            json.dump(benchmark_protocol, f, indent=2, default=str)
-        print(f"[OK] Benchmark protocol saved to: {protocol_path}")
+            json.dump(evaluation_protocol, f, indent=2, default=str)
+        print(f"[OK] Evaluation protocol saved to: {protocol_path}")
         
         try:
             def extract_sequence_attributions(raw_values, seq_len, explainer):
@@ -2788,36 +2788,36 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
 
                 return values.reshape(values.shape[0], -1)[:, :seq_len]
 
-            # Prepare test data for benchmark
+            # Prepare test data for evaluation
             if se is not None and getattr(se, 'test_data', None) is not None:
-                bench_x_seq = np.asarray(se.test_data)
-                bench_x_temp = (
+                evaluation_x_seq = np.asarray(se.test_data)
+                evaluation_x_temp = (
                     np.asarray(se.test_data_temp)
                     if getattr(se, 'test_data_temp', None) is not None
                     else None
                 )
             elif isinstance(test_data, (list, tuple)):
-                bench_x_seq = test_data[0][:num_samples]
-                bench_x_temp = test_data[1][:num_samples]
+                evaluation_x_seq = test_data[0][:num_samples]
+                evaluation_x_temp = test_data[1][:num_samples]
             else:
-                bench_x_seq = test_data[:num_samples]
-                bench_x_temp = None
+                evaluation_x_seq = test_data[:num_samples]
+                evaluation_x_temp = None
             
             # Extract SHAP attributions (handle flattened format)
             shap_attr = None
             if se is not None and se.shap_values is not None:
                 shap_attr = extract_sequence_attributions(
                     se.shap_values.values,
-                    bench_x_seq.shape[1],
+                    evaluation_x_seq.shape[1],
                     se
                 )
-                if shap_attr is not None and shap_attr.shape[0] != len(bench_x_seq):
-                    aligned = min(shap_attr.shape[0], len(bench_x_seq))
-                    print(f"[WARNING] Aligning benchmark samples to {aligned} rows for SHAP consistency.")
+                if shap_attr is not None and shap_attr.shape[0] != len(evaluation_x_seq):
+                    aligned = min(shap_attr.shape[0], len(evaluation_x_seq))
+                    print(f"[WARNING] Aligning evaluation samples to {aligned} rows for SHAP consistency.")
                     shap_attr = shap_attr[:aligned]
-                    bench_x_seq = bench_x_seq[:aligned]
-                    if bench_x_temp is not None:
-                        bench_x_temp = bench_x_temp[:aligned]
+                    evaluation_x_seq = evaluation_x_seq[:aligned]
+                    if evaluation_x_temp is not None:
+                        evaluation_x_temp = evaluation_x_temp[:aligned]
 
             attribution_fn = None
             if se is not None and se.explainer is not None:
@@ -2842,34 +2842,34 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
             
             # Extract LIME attributions if available
             lime_attr = None
-            if methods in ['lime', 'all'] and bench_x_seq is not None and len(bench_x_seq) > 0:
+            if methods in ['lime', 'all'] and evaluation_x_seq is not None and len(evaluation_x_seq) > 0:
                 try:
-                    benchmark_lime = LIMEExplainer(model, task, label_encoder, scaler)
+                    evaluation_lime = LIMEExplainer(model, task, label_encoder, scaler)
                     if feature_config and 'vocab_size' in feature_config:
-                        benchmark_lime.vocab_size = int(feature_config['vocab_size'])
+                        evaluation_lime.vocab_size = int(feature_config['vocab_size'])
                     elif 'le' in dir() and le is not None and le.vocab_size is not None:
-                        benchmark_lime.vocab_size = le.vocab_size
-                    benchmark_lime.initialize_explainer(train_data, num_classes)
-                    benchmark_test_data = (
-                        (bench_x_seq, bench_x_temp) if bench_x_temp is not None else bench_x_seq
+                        evaluation_lime.vocab_size = le.vocab_size
+                    evaluation_lime.initialize_explainer(train_data, num_classes)
+                    evaluation_test_data = (
+                        (evaluation_x_seq, evaluation_x_temp) if evaluation_x_temp is not None else evaluation_x_seq
                     )
-                    benchmark_lime.explain_samples(
-                        benchmark_test_data,
-                        num_samples=len(bench_x_seq),
-                        num_features=int(bench_x_seq.shape[1])
+                    evaluation_lime.explain_samples(
+                        evaluation_test_data,
+                        num_samples=len(evaluation_x_seq),
+                        num_features=int(evaluation_x_seq.shape[1])
                     )
 
                     lime_attr_list = []
-                    seq_len = bench_x_seq.shape[1]
-                    for i, exp in enumerate(benchmark_lime.explanations):
+                    seq_len = evaluation_x_seq.shape[1]
+                    for i, exp in enumerate(evaluation_lime.explanations):
                         if exp is None:
                             lime_attr_list.append(np.full(seq_len, np.nan))
                             continue
 
                         if task == 'activity' and hasattr(exp, 'top_labels') and exp.top_labels:
-                            feature_weights = benchmark_lime._explanation_feature_weights(exp, label=exp.top_labels[0])
+                            feature_weights = evaluation_lime._explanation_feature_weights(exp, label=exp.top_labels[0])
                         else:
-                            feature_weights = benchmark_lime._explanation_feature_weights(exp)
+                            feature_weights = evaluation_lime._explanation_feature_weights(exp)
                         weights = np.zeros(seq_len)
 
                         for feature_idx, weight in feature_weights:
@@ -2880,11 +2880,11 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
                     if lime_attr_list:
                         lime_attr = np.array(lime_attr_list)
                 except Exception as e:
-                    print(f"[WARNING] Could not extract LIME attributions for benchmark: {e}")
+                    print(f"[WARNING] Could not extract LIME attributions for evaluation: {e}")
                     lime_attr = None
             
-            # Initialize and run benchmark
-            benchmark = ExplainabilityBenchmark(
+            # Initialize and run evaluation
+            evaluation = ExplainabilityEvaluation(
                 model=model,
                 task=task,
                 is_multi_input=isinstance(test_data, (list, tuple)),
@@ -2892,26 +2892,26 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
                 temp_shape=getattr(se, '_temp_shape', None) if se else None,
                 scaler=scaler,
                 attribution_fn=attribution_fn,
-                protocol=benchmark_protocol,
+                protocol=evaluation_protocol,
             )
             
             if shap_attr is not None:
-                benchmark_results = benchmark.run_full_benchmark(
-                    x_seq=bench_x_seq,
-                    x_temp=bench_x_temp,
+                evaluation_results = evaluation.run_full_evaluation(
+                    x_seq=evaluation_x_seq,
+                    x_temp=evaluation_x_temp,
                     shap_values=shap_attr,
                     lime_values=lime_attr,
-                    test_seq=bench_x_seq,
+                    test_seq=evaluation_x_seq,
                     k_values=k_values
                 )
                 
-                benchmark.save_results(benchmark_dir)
-                benchmark.print_summary()
+                evaluation.save_results(evaluation_dir)
+                evaluation.print_summary()
             else:
-                print("[WARNING] Could not extract SHAP attributions for benchmark.")
+                print("[WARNING] Could not extract SHAP attributions for evaluation.")
                 
         except Exception as e:
-            print(f"[ERROR] Benchmark evaluation failed: {e}")
+            print(f"[ERROR] Evaluation evaluation failed: {e}")
             import traceback
             traceback.print_exc()
     
@@ -2921,7 +2921,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         generate_comparison_report(output_dir, shap_dir if 'shap' in methods or methods == 'all' else None, 
                                    lime_dir if 'lime' in methods or methods == 'all' else None)
     
-    # Sanity check for benchmark coverage
+    # Sanity check for evaluation coverage
     _validate_explainability_coverage(
         task,
         label_encoder,
@@ -2940,23 +2940,23 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
     print(f"  [OK] LIME local explanations ({num_samples} diverse samples)")
     print("  [OK] Feature importance summary CSV")
     print("  [OK] Method comparison report")
-    if run_benchmark and benchmark_results:
-        print("  [OK] Benchmark evaluation metrics (JSON + CSV)")
+    if run_evaluation and evaluation_results:
+        print("  [OK] Evaluation evaluation metrics (JSON + CSV)")
     print("="*60)
     
-    return benchmark_results
+    return evaluation_results
 
 
 # =============================================================================
-# BENCHMARK COMPARISON UTILITIES
+# EVALUATION COMPARISON UTILITIES
 # =============================================================================
 
-def compare_benchmark_results(benchmark_files, output_path=None):
+def compare_evaluation_results(evaluation_files, output_path=None):
     """
-    Compare benchmark results across multiple models/datasets.
+    Compare evaluation results across multiple models/datasets.
     
     Args:
-        benchmark_files: List of tuples (model_name, benchmark_json_path)
+        evaluation_files: List of tuples (model_name, evaluation_json_path)
         output_path: Optional path to save comparison CSV
         
     Returns:
@@ -2966,7 +2966,7 @@ def compare_benchmark_results(benchmark_files, output_path=None):
     
     comparison_rows = []
     
-    for model_name, filepath in benchmark_files:
+    for model_name, filepath in evaluation_files:
         try:
             with open(filepath, 'r') as f:
                 results = json.load(f)
@@ -3011,17 +3011,17 @@ def compare_benchmark_results(benchmark_files, output_path=None):
     
     if output_path:
         comparison_df.to_csv(output_path, index=False)
-        print(f"[OK] Benchmark comparison saved to: {output_path}")
+        print(f"[OK] Evaluation comparison saved to: {output_path}")
     
     return comparison_df
 
 
-def generate_benchmark_latex_table(comparison_df, output_path=None, caption="Explainability Benchmark Comparison"):
+def generate_evaluation_latex_table(comparison_df, output_path=None, caption="Explainability Evaluation Comparison"):
     """
-    Generate LaTeX table for benchmark comparison (useful for research papers).
+    Generate LaTeX table for evaluation comparison (useful for research papers).
     
     Args:
-        comparison_df: DataFrame from compare_benchmark_results()
+        comparison_df: DataFrame from compare_evaluation_results()
         output_path: Optional path to save .tex file
         caption: Table caption
         
@@ -3057,7 +3057,7 @@ def generate_benchmark_latex_table(comparison_df, output_path=None, caption="Exp
     latex = f"""\\begin{{table}}[htbp]
 \\centering
 \\caption{{{caption}}}
-\\label{{tab:explainability_benchmark}}
+\\label{{tab:explainability_evaluation}}
 {latex}
 \\end{{table}}"""
     

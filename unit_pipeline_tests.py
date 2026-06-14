@@ -850,20 +850,20 @@ class PipelineUnitTests(unittest.TestCase):
             self._record(name, False, str(exc))
             raise
 
-    def test_explainability_benchmark_utils(self):
-        name = "explainability_benchmark_utils"
+    def test_explainability_evaluation_utils(self):
+        name = "explainability_evaluation_utils"
         try:
             try:
                 from explainability.transformers.transformer_explainer import (
-                    compare_benchmark_results,
-                    generate_benchmark_latex_table,
+                    compare_evaluation_results,
+                    generate_evaluation_latex_table,
                 )
             except Exception as import_exc:
                 self._record(name, True, f"skipped: {import_exc}")
                 return
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                json_path = os.path.join(tmpdir, "benchmark.json")
+                json_path = os.path.join(tmpdir, "evaluation.json")
                 payload = {
                     "faithfulness": {"faithfulness_k5": {"spearman_correlation": 0.5}},
                     "comprehensiveness": {"comprehensiveness_k5": {"mean": 0.1}},
@@ -875,9 +875,9 @@ class PipelineUnitTests(unittest.TestCase):
                 with open(json_path, "w", encoding="utf-8") as f:
                     json.dump(payload, f)
 
-                df = compare_benchmark_results([("modelA", json_path)])
+                df = compare_evaluation_results([("modelA", json_path)])
                 self.assertEqual(len(df), 1)
-                latex = generate_benchmark_latex_table(df)
+                latex = generate_evaluation_latex_table(df)
                 self.assertIn("\\begin{table}", latex)
             self._record(name, True)
         except Exception as exc:

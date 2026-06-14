@@ -6,16 +6,16 @@ import type { ExplainValue } from "./Step4Explainability";
 export type ExplainabilityConfig = {
   local_explanation_samples: number;
   global_explanation_sample_percent: number;
-  benchmark_samples: number;
+  evaluation_samples: number;
   min_prefix_length: number;
   max_prefix_length: number | null;
   transformer_explanation_samples: number;
-  benchmark_sampling_strategy: "evenly_spaced" | "random" | "manual" | "diverse";
-  benchmark_random_seed: number;
-  benchmark_sample_indices: string;
-  benchmark_protocol_name: string;
-  benchmark_protocol_version: string;
-  benchmark_protocol_notes: string;
+  evaluation_sampling_strategy: "evenly_spaced" | "random" | "manual" | "diverse";
+  evaluation_random_seed: number;
+  evaluation_sample_indices: string;
+  evaluation_protocol_name: string;
+  evaluation_protocol_version: string;
+  evaluation_protocol_notes: string;
 };
 
 type Step5ExplainabilityConfigProps = {
@@ -66,7 +66,7 @@ export default function Step5ExplainabilityConfig({
             </h3>
             <p className="text-sm text-gray-600">
               {isTransformer
-                ? "Configure deterministic sampling and protocol metadata for transformer explanation benchmarking."
+                ? "Configure deterministic sampling and protocol metadata for transformer explanation evaluation."
                 : "Prefix limits filter the test graphs before local and global explainability samples are selected."}
             </p>
 
@@ -93,15 +93,15 @@ export default function Step5ExplainabilityConfig({
                   min="1"
                   max="100"
                   onChange={(e) => update("global_explanation_sample_percent", n(e.target.value))}
-                  helpText="Uses this percentage of filtered test graphs for global explainability and benchmark aggregation."
+                  helpText="Uses this percentage of filtered test graphs for global explainability and evaluation aggregation."
                 />
                 <ParameterField
-                  label="Benchmark samples"
-                  value={cfg.benchmark_samples}
+                  label="Evaluation samples"
+                  value={cfg.evaluation_samples}
                   placeholder="10"
                   min="1"
-                  onChange={(e) => update("benchmark_samples", n(e.target.value))}
-                  helpText="Number of filtered test graphs used for benchmark metrics. Values above the filtered graph count are clamped automatically."
+                  onChange={(e) => update("evaluation_samples", n(e.target.value))}
+                  helpText="Number of filtered test graphs used for evaluation metrics. Values above the filtered graph count are clamped automatically."
                 />
                 <ParameterField
                   label="Minimum prefix length"
@@ -142,12 +142,12 @@ export default function Step5ExplainabilityConfig({
                   helpText="Uses this percentage of filtered test sequences for global SHAP explainability."
                 />
                 <ParameterField
-                  label="Benchmark samples"
-                  value={cfg.benchmark_samples}
+                  label="Evaluation samples"
+                  value={cfg.evaluation_samples}
                   placeholder="10"
                   min="1"
-                  onChange={(e) => update("benchmark_samples", n(e.target.value))}
-                  helpText="Number of filtered test sequences used for benchmark metrics. Values above the filtered sequence count are clamped automatically."
+                  onChange={(e) => update("evaluation_samples", n(e.target.value))}
+                  helpText="Number of filtered test sequences used for evaluation metrics. Values above the filtered sequence count are clamped automatically."
                 />
                 <ParameterField
                   label="Minimum prefix length"
@@ -168,7 +168,7 @@ export default function Step5ExplainabilityConfig({
                   helpText="Leave empty to include all longer sequences."
                 />
                 <ParameterField
-                  label="Explanation / benchmark samples (legacy)"
+                  label="Explanation / evaluation samples (legacy)"
                   value={cfg.transformer_explanation_samples}
                   placeholder="50"
                   min="1"
@@ -177,48 +177,48 @@ export default function Step5ExplainabilityConfig({
                 />
                 <SelectField
                   label="Sampling strategy"
-                  value={cfg.benchmark_sampling_strategy}
+                  value={cfg.evaluation_sampling_strategy}
                   options={[
                     { value: "evenly_spaced", label: "Evenly spaced" },
                     { value: "random", label: "Random seed" },
                     { value: "manual", label: "Manual indices" },
                     { value: "diverse", label: "Diverse coverage" },
                   ]}
-                  onChange={(value) => update("benchmark_sampling_strategy", value)}
-                  helpText="Controls how test sample indices are selected for the benchmark protocol."
+                  onChange={(value) => update("evaluation_sampling_strategy", value)}
+                  helpText="Controls how test sample indices are selected for the evaluation protocol."
                 />
                 <ParameterField
                   label="Random seed"
-                  value={cfg.benchmark_random_seed}
+                  value={cfg.evaluation_random_seed}
                   placeholder="42"
-                  onChange={(e) => update("benchmark_random_seed", n(e.target.value))}
+                  onChange={(e) => update("evaluation_random_seed", n(e.target.value))}
                   helpText="Used when sampling is random and recorded in the protocol JSON."
                 />
                 <TextField
                   label="Selected sample indices"
-                  value={cfg.benchmark_sample_indices}
+                  value={cfg.evaluation_sample_indices}
                   placeholder="0, 5, 12"
-                  onChange={(value) => update("benchmark_sample_indices", value)}
+                  onChange={(value) => update("evaluation_sample_indices", value)}
                   helpText="Optional comma-separated test indices. Used only when sampling strategy is Manual indices."
                 />
                 <TextField
                   label="Protocol name"
-                  value={cfg.benchmark_protocol_name}
-                  placeholder="Perturbation-Based Explainability Benchmark"
-                  onChange={(value) => update("benchmark_protocol_name", value)}
+                  value={cfg.evaluation_protocol_name}
+                  placeholder="Perturbation-Based Explainability Evaluation"
+                  onChange={(value) => update("evaluation_protocol_name", value)}
                 />
                 <TextField
                   label="Protocol version"
-                  value={cfg.benchmark_protocol_version}
+                  value={cfg.evaluation_protocol_version}
                   placeholder="1.0"
-                  onChange={(value) => update("benchmark_protocol_version", value)}
+                  onChange={(value) => update("evaluation_protocol_version", value)}
                 />
                 <div className="col-span-2">
                   <TextAreaField
                     label="Protocol notes"
-                    value={cfg.benchmark_protocol_notes}
+                    value={cfg.evaluation_protocol_notes}
                     placeholder="Fixed sampling, zero masking, k-values 5/10/15/20/25."
-                    onChange={(value) => update("benchmark_protocol_notes", value)}
+                    onChange={(value) => update("evaluation_protocol_notes", value)}
                   />
                 </div>
               </div>
@@ -276,17 +276,17 @@ function SelectField({
   onChange,
 }: {
   label: string;
-  value: ExplainabilityConfig["benchmark_sampling_strategy"];
-  options: Array<{ value: ExplainabilityConfig["benchmark_sampling_strategy"]; label: string }>;
+  value: ExplainabilityConfig["evaluation_sampling_strategy"];
+  options: Array<{ value: ExplainabilityConfig["evaluation_sampling_strategy"]; label: string }>;
   helpText?: string;
-  onChange: (value: ExplainabilityConfig["benchmark_sampling_strategy"]) => void;
+  onChange: (value: ExplainabilityConfig["evaluation_sampling_strategy"]) => void;
 }) {
   return (
     <div className="border rounded-lg p-4 bg-white">
       <div className="text-sm text-gray-600 mb-1">{label}</div>
       <select
         value={value}
-        onChange={(e) => onChange(e.target.value as ExplainabilityConfig["benchmark_sampling_strategy"])}
+        onChange={(e) => onChange(e.target.value as ExplainabilityConfig["evaluation_sampling_strategy"])}
         className="w-full bg-white text-black border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
       >
         {options.map((option) => (

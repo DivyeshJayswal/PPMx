@@ -1,6 +1,6 @@
 # PPMX (Predictive Process Monitoring Explainer)
 
-PPMX (Predictive Process Monitoring Explainer) is a tool for Predictive Process Monitoring (PPM) which provides fast and easy No Code solution for process prediction and explainability to black box models like Transformer and Graph Neural Networks (GNNs) with explainability and benchmarking. It is designed for experimentation on event logs, and allows users to train models, inspect results, and compare explainability methods in a single workflow.
+PPMX (Predictive Process Monitoring Explainer) is a tool for Predictive Process Monitoring (PPM) which provides fast and easy No Code solution for process prediction and explainability to black box models like Transformer and Graph Neural Networks (GNNs) with explainability and evaluation. It is designed for experimentation on event logs, and allows users to train models, inspect results, and compare explainability methods in a single workflow.
 
 **PPMX Architecture**
 ![PPMX Architecture](frontend/src/assets/ppmx_software_architecture_updated.png)
@@ -8,7 +8,7 @@ PPMX (Predictive Process Monitoring Explainer) is a tool for Predictive Process 
 **Key Features**
 - No-code workflow for training and explainability.
 - Transformer and GNN support for next activity, event time, and remaining time.
-- Explainability and benchmarking in one pipeline.
+- Explainability and evaluation in one pipeline.
 - Frontend dashboard powered by a FastAPI backend
 
 
@@ -102,8 +102,8 @@ These sample event logs are available from the Dataset Setup step in the UI and 
 1. Preprocess the event log: upload raw CSV/XES or a preprocessed CSV. Optionally skip preprocessing by uploading pre-split datasets via the GUI. Map required columns (case ID, activity, timestamp; resource optional). For standardized BPI 2017/2020 logs, automatic column detection is supported in batch/CLI.
 2. Train and predict: choose Transformer or GNN and select a task. Classification supports next-activity and custom target prediction; regression supports event-time and remaining-time. Configure hyperparameters in the GUI or use defaults, then run training and generate test-set predictions.
 3. Explainability analysis: for Transformers, use SHAP (feature importance bar + beeswarm) and LIME (local explanation plots). For GNNs, the current path uses a PROPHET-style heterogeneous GAT with GNNExplainer-style local node/edge explanations and global view-importance aggregation.
-4. Benchmarking: compute faithfulness, comprehensiveness, sufficiency, monotonicity, and method agreement to compare explanation quality.
-5. Export artifacts: each run is packaged as a ZIP containing the trained model, prediction CSVs, explainability plots, and benchmarking summary for reproducibility.
+4. Evaluation: compute faithfulness, comprehensiveness, sufficiency, monotonicity, and method agreement to compare explanation quality.
+5. Export artifacts: each run is packaged as a ZIP containing the trained model, prediction CSVs, explainability plots, and evaluation summary for reproducibility.
 
 **Project Structure**
 - `frontend/` Frontend app (Vite + React).
