@@ -2158,10 +2158,83 @@ class GNNExplainabilityEvaluation:
         return filepath, summary_df
 
 
-def _select_sample_indices(num_graphs, sample_count):
-    sample_count = min(sample_count, num_graphs)
+def _parse_sample_indices(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[\s,;]+", value.strip())
+    elif isinstance(value, (list, tuple, set)):
+        parts = list(value)
+    else:
+        parts = [value]
+
+    indices = []
+    for part in parts:
+        if part in {None, ""}:
+            continue
+        try:
+            parsed = int(part)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            indices.append(parsed)
+    return indices
+
+
+def _normalize_sampling_strategy(value):
+    strategy = str(value or "evenly_spaced").strip().lower()
+    return strategy if strategy in {"evenly_spaced", "random", "manual", "diverse"} else "evenly_spaced"
+
+
+def _select_sample_indices(
+    num_graphs,
+    sample_count,
+    strategy="evenly_spaced",
+    seed=42,
+    manual_indices=None,
+    original_indices=None,
+    prefix_lengths=None,
+):
+    sample_count = min(int(sample_count), num_graphs)
     if sample_count <= 0:
         return []
+    strategy = _normalize_sampling_strategy(strategy)
+    original_indices = list(original_indices) if original_indices is not None else list(range(num_graphs))
+
+    if strategy == "manual":
+        original_to_position = {int(original_idx): pos for pos, original_idx in enumerate(original_indices)}
+        selected = []
+        seen = set()
+        for original_idx in manual_indices or []:
+            position = original_to_position.get(int(original_idx))
+            if position is None or position in seen:
+                continue
+            selected.append(position)
+            seen.add(position)
+            if len(selected) >= sample_count:
+                break
+        return selected
+
+    if strategy == "random":
+        try:
+            parsed_seed = int(seed)
+        except (TypeError, ValueError):
+            parsed_seed = 42
+        rng = np.random.default_rng(parsed_seed)
+        return sorted(rng.choice(num_graphs, size=sample_count, replace=False).astype(int).tolist())
+
+    if strategy == "diverse" and prefix_lengths and len(prefix_lengths) == num_graphs:
+        ordered_positions = [
+            pos for pos, _ in sorted(
+                enumerate(prefix_lengths),
+                key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0, item[0]),
+            )
+        ]
+        if sample_count == 1:
+            return [ordered_positions[0]]
+        selected_offsets = sorted(set(np.linspace(0, num_graphs - 1, sample_count, dtype=int).tolist()))
+        return sorted(ordered_positions[offset] for offset in selected_offsets)
+
     if sample_count == 1:
         return [0]
     return sorted(set(np.linspace(0, num_graphs - 1, sample_count, dtype=int).tolist()))
@@ -2242,7 +2315,8 @@ def _filter_graphs_by_prefix_length(graphs, min_prefix_length=None, max_prefix_l
 
     filtered = []
     skipped_unknown = 0
-    for graph in graphs:
+    original_indices = []
+    for idx, graph in enumerate(graphs):
         prefix_length = _graph_prefix_length(graph)
         if prefix_length is None:
             skipped_unknown += 1
@@ -2252,6 +2326,7 @@ def _filter_graphs_by_prefix_length(graphs, min_prefix_length=None, max_prefix_l
         if max_prefix is not None and prefix_length > max_prefix:
             continue
         filtered.append(graph)
+        original_indices.append(idx)
 
     if not filtered:
         range_label = f">= {min_prefix}" if max_prefix is None else f"{min_prefix}..{max_prefix}"
@@ -2260,7 +2335,7 @@ def _filter_graphs_by_prefix_length(graphs, min_prefix_length=None, max_prefix_l
             f"({range_label}). Skipped {skipped_unknown} graphs with unknown prefix length."
         )
 
-    return filtered, min_prefix, max_prefix
+    return filtered, min_prefix, max_prefix, original_indices
 
 
 def run_gnn_explainability(
@@ -2280,6 +2355,10 @@ def run_gnn_explainability(
     evaluation_sample_count=None,
     min_prefix_length=None,
     max_prefix_length=None,
+    evaluation_sampling_strategy="evenly_spaced",
+    evaluation_random_seed=42,
+    evaluation_sample_indices=None,
+    evaluation_protocol_name=None,
 ):
     del methods, scaler, y_true
     os.makedirs(output_dir, exist_ok=True)
@@ -2288,7 +2367,7 @@ def run_gnn_explainability(
     if not graphs:
         raise RuntimeError("No test graphs available for GNN explainability.")
     original_graph_count = len(graphs)
-    graphs, applied_min_prefix, applied_max_prefix = _filter_graphs_by_prefix_length(
+    graphs, applied_min_prefix, applied_max_prefix, filtered_original_indices = _filter_graphs_by_prefix_length(
         graphs,
         min_prefix_length=min_prefix_length,
         max_prefix_length=max_prefix_length,
@@ -2308,21 +2387,101 @@ def run_gnn_explainability(
     evaluation_results = {}
     evaluation_frames = []
     local_num_samples = max(0, int(local_num_samples))
-    sample_indices = _select_sample_indices(len(graphs), local_num_samples)
+    sampling_strategy = _normalize_sampling_strategy(evaluation_sampling_strategy)
+    manual_indices = _parse_sample_indices(evaluation_sample_indices)
+    random_seed = _to_optional_int(evaluation_random_seed)
+    if random_seed is None:
+        random_seed = 42
+    prefix_lengths = [_graph_prefix_length(graph) for graph in graphs]
+    sample_indices = _select_sample_indices(
+        len(graphs),
+        local_num_samples,
+        strategy=sampling_strategy,
+        seed=random_seed,
+        manual_indices=manual_indices,
+        original_indices=filtered_original_indices,
+        prefix_lengths=prefix_lengths,
+    )
     
     global_sample_percent = float(global_sample_percent)
     global_sample_percent = min(max(global_sample_percent, 0.0), 100.0)
     num_global_graphs = max(1, int(np.ceil(len(graphs) * (global_sample_percent / 100.0))))
-    global_indices = _select_sample_indices(len(graphs), num_global_graphs)
+    global_indices = _select_sample_indices(
+        len(graphs),
+        num_global_graphs,
+        strategy=sampling_strategy,
+        seed=random_seed,
+        manual_indices=manual_indices,
+        original_indices=filtered_original_indices,
+        prefix_lengths=prefix_lengths,
+    )
     global_graphs = [graphs[i] for i in global_indices]
     parsed_evaluation_sample_count = _to_optional_int(evaluation_sample_count)
     if parsed_evaluation_sample_count is not None:
         parsed_evaluation_sample_count = max(1, min(parsed_evaluation_sample_count, len(graphs)))
-        evaluation_indices = _select_sample_indices(len(graphs), parsed_evaluation_sample_count)
+        evaluation_indices = _select_sample_indices(
+            len(graphs),
+            parsed_evaluation_sample_count,
+            strategy=sampling_strategy,
+            seed=random_seed,
+            manual_indices=manual_indices,
+            original_indices=filtered_original_indices,
+            prefix_lengths=prefix_lengths,
+        )
         evaluation_graphs = [graphs[i] for i in evaluation_indices]
     else:
         evaluation_indices = global_indices
         evaluation_graphs = list(global_graphs)
+
+    if local_num_samples > 0 and not sample_indices:
+        raise RuntimeError(
+            "GNN explainability protocol selected no valid local test graphs. "
+            "Check evaluation_sample_indices or sampling configuration."
+        )
+    if not global_indices:
+        raise RuntimeError(
+            "GNN explainability protocol selected no valid global test graphs. "
+            "Check evaluation_sample_indices or sampling configuration."
+        )
+    if run_evaluation and not evaluation_indices:
+        raise RuntimeError(
+            "GNN explainability protocol selected no valid evaluation test graphs. "
+            "Check evaluation_sample_indices or sampling configuration."
+        )
+
+    local_original_indices = [filtered_original_indices[i] for i in sample_indices]
+    global_original_indices = [filtered_original_indices[i] for i in global_indices]
+    evaluation_original_indices = [filtered_original_indices[i] for i in evaluation_indices]
+    evaluation_protocol = {
+        "name": evaluation_protocol_name or "Perturbation-Based Explainability Evaluation",
+        "model_family": "gnn",
+        "tasks": tasks,
+        "sampling_strategy": sampling_strategy,
+        "random_seed": random_seed,
+        "manual_sample_indices": manual_indices,
+        "min_prefix_length": applied_min_prefix,
+        "max_prefix_length": applied_max_prefix,
+        "original_test_graph_count": original_graph_count,
+        "valid_pool_size": len(graphs),
+        "valid_original_graph_indices": filtered_original_indices,
+        "global_sample_percent": global_sample_percent,
+        "requested_global_sample_count": num_global_graphs,
+        "requested_local_sample_count": local_num_samples,
+        "requested_evaluation_sample_count": parsed_evaluation_sample_count,
+        "actual_global_sample_count": len(global_indices),
+        "actual_local_sample_count": len(sample_indices),
+        "actual_evaluation_sample_count": len(evaluation_indices),
+        "local_sample_indices": local_original_indices,
+        "global_sample_indices": global_original_indices,
+        "evaluation_sample_indices": evaluation_original_indices,
+    }
+    if run_evaluation:
+        evaluation_dir = os.path.join(output_dir, "evaluation")
+        os.makedirs(evaluation_dir, exist_ok=True)
+        protocol_path = os.path.join(evaluation_dir, "evaluation_protocol.json")
+        with open(protocol_path, "w", encoding="utf-8") as handle:
+            json.dump(evaluation_protocol, handle, indent=2, default=_serialize_scalar)
+        print(f"[OK] Evaluation protocol saved to: {protocol_path}")
 
     for task in tasks:
         task_dir = os.path.join(output_dir, "prophet", task)
@@ -2367,7 +2526,8 @@ def run_gnn_explainability(
                 evaluation_frames.append(task_summary_df)
 
         summary[task] = {
-            "sample_indices": sample_indices,
+            "sample_indices": local_original_indices,
+            "filtered_sample_positions": sample_indices,
             "num_candidate_graphs": len(graphs),
             "original_num_candidate_graphs": original_graph_count,
             "min_prefix_length": applied_min_prefix,
@@ -2376,7 +2536,12 @@ def run_gnn_explainability(
             "global_sample_percent": global_sample_percent,
             "num_evaluation_graphs": len(evaluation_graphs),
             "evaluation_sample_count": parsed_evaluation_sample_count,
-            "evaluation_sample_indices": evaluation_indices,
+            "evaluation_sample_indices": evaluation_original_indices,
+            "filtered_evaluation_sample_positions": evaluation_indices,
+            "sampling_strategy": sampling_strategy,
+            "random_seed": random_seed,
+            "manual_sample_indices": manual_indices,
+            "protocol_name": evaluation_protocol["name"],
             "top_global_view": None if global_df.empty else str(global_df.iloc[0]["activity"]),
             "top_global_activity": None if global_df.empty else str(global_df.iloc[0]["activity"]),
             "evaluation_enabled": bool(run_evaluation),
@@ -2428,6 +2593,10 @@ class GNNExplainerWrapper:
         evaluation_sample_count=None,
         min_prefix_length=None,
         max_prefix_length=None,
+        evaluation_sampling_strategy="evenly_spaced",
+        evaluation_random_seed=42,
+        evaluation_sample_indices=None,
+        evaluation_protocol_name=None,
     ):
         return run_gnn_explainability(
             model=self.model,
@@ -2445,4 +2614,8 @@ class GNNExplainerWrapper:
             evaluation_sample_count=evaluation_sample_count,
             min_prefix_length=min_prefix_length,
             max_prefix_length=max_prefix_length,
+            evaluation_sampling_strategy=evaluation_sampling_strategy,
+            evaluation_random_seed=evaluation_random_seed,
+            evaluation_sample_indices=evaluation_sample_indices,
+            evaluation_protocol_name=evaluation_protocol_name,
         )

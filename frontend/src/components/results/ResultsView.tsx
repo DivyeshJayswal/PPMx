@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent, type WheelEvent } from "react";
+import { X } from "lucide-react";
 
 import { artifactUrl, artifactsZipUrl, listArtifacts } from "../../lib/api";
 
@@ -10,14 +11,15 @@ type ResultsViewProps = {
 };
 
 export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish }: ResultsViewProps) {
+  const [artifacts, setArtifacts] = useState<string[]>([]);
   const [pngs, setPngs] = useState<string[]>([]);
   const [summaryData, setSummaryData] = useState<Record<string, unknown> | null>(null);
   const [metricsData, setMetricsData] = useState<Record<string, unknown> | null>(null);
   const [datasetSummaryData, setDatasetSummaryData] = useState<Record<string, unknown> | null>(null);
   const [trainingSummaryData, setTrainingSummaryData] = useState<Record<string, unknown> | null>(null);
-  const [benchmarkRows, setBenchmarkRows] = useState<Array<Record<string, string>>>([]);
-  const [benchmarkHeaders, setBenchmarkHeaders] = useState<string[]>([]);
-  const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
+  const [evaluationRows, setEvaluationRows] = useState<Array<Record<string, string>>>([]);
+  const [evaluationHeaders, setEvaluationHeaders] = useState<string[]>([]);
+  const [evaluationError, setEvaluationError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeImage, setActiveImage] = useState<{ src: string; name: string } | null>(
@@ -41,24 +43,27 @@ export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish
 
     const loadArtifacts = async () => {
       if (!runId) {
+        setArtifacts([]);
         setPngs([]);
         setSummaryData(null);
         setMetricsData(null);
         setDatasetSummaryData(null);
         setTrainingSummaryData(null);
-        setBenchmarkRows([]);
-        setBenchmarkHeaders([]);
+        setEvaluationRows([]);
+        setEvaluationHeaders([]);
         return;
       }
       setLoading(true);
       setError(null);
-      setBenchmarkError(null);
+      setEvaluationError(null);
       try {
         const res = await listArtifacts(runId);
         if (cancelled) return;
-        const images = (res.artifacts ?? []).filter((path) =>
+        const artifactPaths = res.artifacts ?? [];
+        const images = artifactPaths.filter((path) =>
           path.toLowerCase().endsWith(".png")
         );
+        setArtifacts(artifactPaths);
         setPngs(images);
         const [summaryRes, metricsRes, datasetSummaryRes, trainingSummaryRes] = await Promise.all([
           fetch(artifactUrl(runId, "summary.json")),
@@ -91,6 +96,7 @@ export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish
         if (cancelled) return;
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
+        setArtifacts([]);
         setPngs([]);
         setSummaryData(null);
         setMetricsData(null);
@@ -110,47 +116,64 @@ export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish
 
   useEffect(() => {
     let cancelled = false;
-    const loadBenchmark = async () => {
-      if (!runId) return;
-      setBenchmarkError(null);
+    const loadEvaluation = async () => {
+      if (!runId) {
+        setEvaluationRows([]);
+        setEvaluationHeaders([]);
+        return;
+      }
+      setEvaluationError(null);
+      setEvaluationRows([]);
+      setEvaluationHeaders([]);
       try {
+        const discoveredEvaluationPaths = artifacts
+          .filter((path) => {
+            const normalized = normalizePath(path);
+            return (
+              normalized.includes("/evaluation/") &&
+              normalized.endsWith(".csv") &&
+              (normalized.endsWith("evaluation_summary.csv") ||
+                normalized.endsWith("_summary.csv"))
+            );
+          })
+          .sort((a, b) => {
+            const aName = normalizePath(a);
+            const bName = normalizePath(b);
+            if (aName.endsWith("evaluation_summary.csv")) return -1;
+            if (bName.endsWith("evaluation_summary.csv")) return 1;
+            return aName.localeCompare(bName);
+          });
+
         const candidatePaths = [
+          ...discoveredEvaluationPaths,
+          "explainability/evaluation/evaluation_summary.csv",
           "explainability/benchmark/benchmark_summary.csv",
           "explainability/benchmark/benchmark_results_summary.csv",
         ];
 
-        for (const candidate of candidatePaths) {
-          const csvUrl = artifactUrl(runId, candidate);
+        for (const candidate of Array.from(new Set(candidatePaths))) {
+          const csvUrl = artifactUrl(runId, candidate.replace(/\\/g, "/"));
           const resp = await fetch(csvUrl);
           if (!resp.ok) continue;
           const text = await resp.text();
           if (cancelled) return;
-          const lines = text.trim().split(/\r?\n/).filter(Boolean);
-          if (!lines.length) continue;
-          const headers = lines[0].split(",").map((h) => h.trim());
-          const rows = lines.slice(1).map((line) => {
-            const cols = line.split(",");
-            const row: Record<string, string> = {};
-            headers.forEach((h, i) => {
-              row[h] = (cols[i] ?? "").trim();
-            });
-            return row;
-          });
-          setBenchmarkHeaders(headers);
-          setBenchmarkRows(rows);
+          const parsed = parseCsv(text);
+          if (!parsed) continue;
+          setEvaluationHeaders(parsed.headers);
+          setEvaluationRows(parsed.rows);
           return;
         }
       } catch (e) {
         if (!cancelled) {
-          setBenchmarkError(e instanceof Error ? e.message : String(e));
+          setEvaluationError(e instanceof Error ? e.message : String(e));
         }
       }
     };
-    loadBenchmark();
+    loadEvaluation();
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, artifacts]);
 
   useEffect(() => {
     if (!activeImage) return;
@@ -339,13 +362,13 @@ export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish
                     runId={runId}
                     onOpen={setActiveImage}
                   />
-                  <BenchmarkSection
-                    headers={benchmarkHeaders}
-                    rows={benchmarkRows}
-                    error={benchmarkError}
-                  />
                 </>
               )}
+              <EvaluationSection
+                headers={evaluationHeaders}
+                rows={evaluationRows}
+                error={evaluationError}
+              />
             </div>
           </div>
         </div>
@@ -385,6 +408,14 @@ export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish
           onClick={() => setActiveImage(null)}
           onWheel={handleWheel}
         >
+          <button
+            className="fixed right-4 top-4 z-10 inline-flex h-10 w-10 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-brand-500"
+            onClick={() => setActiveImage(null)}
+            aria-label="Close image preview"
+            type="button"
+          >
+            <X className="h-5 w-5" aria-hidden="true" />
+          </button>
           <div
             className="relative max-h-full max-w-6xl w-full"
             onClick={(e) => e.stopPropagation()}
@@ -395,7 +426,7 @@ export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish
             style={{ touchAction: "none" }}
           >
             <button
-              className="absolute -top-3 -right-3 h-9 w-9 rounded-full bg-white text-gray-700 border shadow hover:bg-gray-50"
+              className="hidden"
               onClick={() => setActiveImage(null)}
               aria-label="Close image preview"
               type="button"
@@ -420,6 +451,49 @@ export default function ResultsView({ runId, onBackToPipeline, onRerun, onFinish
 
 function normalizePath(path: string) {
   return path.replace(/\\/g, "/").toLowerCase();
+}
+
+function parseCsv(text: string) {
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return null;
+  const headers = parseCsvLine(lines[0]).map((h) => h.trim());
+  const rows = lines.slice(1).map((line) => {
+    const cols = parseCsvLine(line);
+    const row: Record<string, string> = {};
+    headers.forEach((h, i) => {
+      row[h] = (cols[i] ?? "").trim();
+    });
+    return row;
+  });
+  return rows.length ? { headers, rows } : null;
+}
+
+function parseCsvLine(line: string) {
+  const cells: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    const next = line[i + 1];
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"';
+      i += 1;
+      continue;
+    }
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (char === "," && !inQuotes) {
+      cells.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current);
+  return cells;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -780,7 +854,7 @@ function ImageSection({
   );
 }
 
-function BenchmarkSection({
+function EvaluationSection({
   headers,
   rows,
   error,
@@ -792,29 +866,29 @@ function BenchmarkSection({
   if (error) {
     return (
       <section className="space-y-2">
-        <div className="text-sm font-semibold text-brand-900">Benchmark</div>
-        <div className="text-sm text-red-600">Failed to load benchmark: {error}</div>
+        <div className="text-sm font-semibold text-brand-900">Evaluation</div>
+        <div className="text-sm text-red-600">Failed to load evaluation: {error}</div>
       </section>
     );
   }
   if (!headers.length || !rows.length) return null;
 
-  const benchmarkTable = buildBenchmarkMatrix(rows);
-  if (!benchmarkTable.rows.length) return null;
+  const evaluationTable = buildEvaluationMatrix(rows);
+  if (!evaluationTable.metricRows.length || !evaluationTable.kColumns.length) return null;
 
   return (
     <section className="space-y-3">
-      <div className="text-sm font-semibold text-brand-900">Benchmark</div>
+      <div className="text-sm font-semibold text-brand-900">Evaluation</div>
       <div className="text-xs text-brand-600">
         Columns are k-values. Each cell shows the metric value and n=valid_sample_count.
       </div>
-      {benchmarkTable.rows.length ? (
+      {evaluationTable.metricRows.length ? (
         <div className="overflow-auto border border-brand-100 rounded-lg bg-white">
           <table className="min-w-full text-sm">
             <thead className="bg-brand-50 text-brand-800">
               <tr>
                 <th className="text-left px-3 py-2 font-medium border-b border-brand-100">Metric</th>
-                {benchmarkTable.kColumns.map((k) => (
+                {evaluationTable.kColumns.map((k) => (
                   <th
                     key={k}
                     className="text-left px-3 py-2 font-medium border-b border-brand-100 min-w-[170px]"
@@ -825,7 +899,7 @@ function BenchmarkSection({
               </tr>
             </thead>
             <tbody>
-              {benchmarkTable.metricRows.map((row) => (
+              {evaluationTable.metricRows.map((row) => (
                 <tr key={row.metricKey} className="odd:bg-white even:bg-brand-50/40">
                   <td
                     className="px-3 py-2 border-b border-brand-100 text-gray-800 font-medium"
@@ -833,7 +907,7 @@ function BenchmarkSection({
                   >
                     {row.label}
                   </td>
-                  {benchmarkTable.kColumns.map((k) => {
+                  {evaluationTable.kColumns.map((k) => {
                     const cell = row.values[k];
                     return (
                       <td key={`${row.metricKey}-${k}`} className="px-3 py-2 border-b border-brand-100 text-gray-700 align-top">
@@ -854,8 +928,14 @@ function BenchmarkSection({
   );
 }
 
-function buildBenchmarkMatrix(rows: Array<Record<string, string>>) {
-  const kColumns = ["k5", "k10", "k15", "k20", "k25"];
+function buildEvaluationMatrix(rows: Array<Record<string, string>>) {
+  const kColumns = Array.from(
+    new Set(
+      rows
+        .map((row) => String(row.metric || row.Metric || row.METRIC || "").toLowerCase().match(/(?:^|_)(k\d+)(?:_|$)/)?.[1])
+        .filter((k): k is string => Boolean(k))
+    )
+  ).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
   const metricRows = [
     { metricKey: "spearman_correlation", label: "Faithfulness Spearman" },
     { metricKey: "pearson_correlation", label: "Faithfulness Pearson" },
@@ -878,7 +958,7 @@ function buildBenchmarkMatrix(rows: Array<Record<string, string>>) {
     const metric = ((row.metric || row.Metric || row.METRIC || "") as string).toLowerCase();
     const rawValue = row.value || row.Value || row.VALUE || "";
     const num = Number(rawValue);
-    const kMatch = metric.match(/_(k\d+)_/);
+    const kMatch = metric.match(/(?:^|_)(k\d+)(?:_|$)/);
     if (!kMatch) continue;
     const kKey = kMatch[1];
     if (!kColumns.includes(kKey)) continue;
@@ -932,7 +1012,7 @@ function buildBenchmarkMatrix(rows: Array<Record<string, string>>) {
     };
   }
 
-  return { kColumns, metricRows: structuredMetricRows, rows: structuredMetricRows };
+  return { kColumns, metricRows: structuredMetricRows };
 }
 
 function metricHelp(metric: string) {
@@ -949,6 +1029,6 @@ function metricHelp(metric: string) {
   if (key.includes("temporal_consistency")) {
     return "Temporal recency correlation: positive values mean later/recent events are more important; negative values mean earlier events are more important. This is descriptive, not always a good/bad score.";
   }
-  return "Benchmark metric.";
+  return "Evaluation metric.";
 }
 

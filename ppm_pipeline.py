@@ -860,6 +860,10 @@ def run_gnn_unified_prediction(
             evaluation_sample_count=explainability_config.get('evaluation_samples'),
             min_prefix_length=explainability_config.get('min_prefix_length'),
             max_prefix_length=explainability_config.get('max_prefix_length'),
+            evaluation_sampling_strategy=explainability_config.get('evaluation_sampling_strategy', 'evenly_spaced'),
+            evaluation_random_seed=explainability_config.get('evaluation_random_seed', 42),
+            evaluation_sample_indices=explainability_config.get('evaluation_sample_indices'),
+            evaluation_protocol_name=explainability_config.get('evaluation_protocol_name'),
         )
 
     return metrics

@@ -14,8 +14,6 @@ export type ExplainabilityConfig = {
   evaluation_random_seed: number;
   evaluation_sample_indices: string;
   evaluation_protocol_name: string;
-  evaluation_protocol_version: string;
-  evaluation_protocol_notes: string;
 };
 
 type Step5ExplainabilityConfigProps = {
@@ -62,12 +60,12 @@ export default function Step5ExplainabilityConfig({
 
           <div className="flex-1 min-w-0">
             <h3 className="text-lg font-semibold">
-              {isTransformer ? "Transformer Explainability Protocol" : "GNN Explainability Samples"}
+              {isTransformer ? "Transformer Explainability Config" : "GNN Explainability Config"}
             </h3>
             <p className="text-sm text-gray-600">
               {isTransformer
-                ? "Configure deterministic sampling and protocol metadata for transformer explanation evaluation."
-                : "Prefix limits filter the test graphs before local and global explainability samples are selected."}
+                ? "Configure deterministic sampling for transformer explanation evaluation."
+                : "Configure deterministic sampling and prefix limits for GNN explanation evaluation."}
             </p>
 
             {disabled ? (
@@ -120,6 +118,38 @@ export default function Step5ExplainabilityConfig({
                     update("max_prefix_length", e.target.value === "" ? null : n(e.target.value))
                   }
                   helpText="Leave empty to include all longer prefixes."
+                />
+                <SelectField
+                  label="Sampling strategy"
+                  value={cfg.evaluation_sampling_strategy}
+                  options={[
+                    { value: "evenly_spaced", label: "Evenly spaced" },
+                    { value: "random", label: "Random seed" },
+                    { value: "manual", label: "Manual indices" },
+                    { value: "diverse", label: "Diverse coverage" },
+                  ]}
+                  onChange={(value) => update("evaluation_sampling_strategy", value)}
+                  helpText="Controls how filtered test graphs are selected for local, global, and evaluation outputs."
+                />
+                <ParameterField
+                  label="Random seed"
+                  value={cfg.evaluation_random_seed}
+                  placeholder="42"
+                  onChange={(e) => update("evaluation_random_seed", n(e.target.value))}
+                  helpText="Used when sampling is random and recorded in the config JSON."
+                />
+                <TextField
+                  label="Selected graph indices"
+                  value={cfg.evaluation_sample_indices}
+                  placeholder="0, 5, 12"
+                  onChange={(value) => update("evaluation_sample_indices", value)}
+                  helpText="Optional comma-separated original test graph indices. Used only when sampling strategy is Manual indices."
+                />
+                <TextField
+                  label="Config name"
+                  value={cfg.evaluation_protocol_name}
+                  placeholder="Perturbation-Based Explainability Evaluation"
+                  onChange={(value) => update("evaluation_protocol_name", value)}
                 />
               </div>
             ) : isTransformer ? (
@@ -185,14 +215,14 @@ export default function Step5ExplainabilityConfig({
                     { value: "diverse", label: "Diverse coverage" },
                   ]}
                   onChange={(value) => update("evaluation_sampling_strategy", value)}
-                  helpText="Controls how test sample indices are selected for the evaluation protocol."
+                  helpText="Controls how test sample indices are selected for the evaluation config."
                 />
                 <ParameterField
                   label="Random seed"
                   value={cfg.evaluation_random_seed}
                   placeholder="42"
                   onChange={(e) => update("evaluation_random_seed", n(e.target.value))}
-                  helpText="Used when sampling is random and recorded in the protocol JSON."
+                  helpText="Used when sampling is random and recorded in the config JSON."
                 />
                 <TextField
                   label="Selected sample indices"
@@ -202,25 +232,11 @@ export default function Step5ExplainabilityConfig({
                   helpText="Optional comma-separated test indices. Used only when sampling strategy is Manual indices."
                 />
                 <TextField
-                  label="Protocol name"
+                  label="Config name"
                   value={cfg.evaluation_protocol_name}
                   placeholder="Perturbation-Based Explainability Evaluation"
                   onChange={(value) => update("evaluation_protocol_name", value)}
                 />
-                <TextField
-                  label="Protocol version"
-                  value={cfg.evaluation_protocol_version}
-                  placeholder="1.0"
-                  onChange={(value) => update("evaluation_protocol_version", value)}
-                />
-                <div className="col-span-2">
-                  <TextAreaField
-                    label="Protocol notes"
-                    value={cfg.evaluation_protocol_notes}
-                    placeholder="Fixed sampling, zero masking, k-values 5/10/15/20/25."
-                    onChange={(value) => update("evaluation_protocol_notes", value)}
-                  />
-                </div>
               </div>
             ) : null}
           </div>
@@ -320,34 +336,6 @@ function TextField({
         type="text"
         value={value}
         placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full bg-white text-black border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
-      />
-      {helpText ? <div className="mt-2 text-xs text-gray-500">{helpText}</div> : null}
-    </div>
-  );
-}
-
-function TextAreaField({
-  label,
-  value,
-  placeholder,
-  helpText,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  placeholder: string;
-  helpText?: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="border rounded-lg p-4 bg-white">
-      <div className="text-sm text-gray-600 mb-1">{label}</div>
-      <textarea
-        value={value}
-        placeholder={placeholder}
-        rows={3}
         onChange={(e) => onChange(e.target.value)}
         className="w-full bg-white text-black border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
       />

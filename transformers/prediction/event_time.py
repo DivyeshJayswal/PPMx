@@ -417,11 +417,14 @@ class EventTimePredictor:
             return
         
         plt.figure(figsize=(10, 6))
-        plt.plot(self.history.history[train_loss_key], label="Training Loss", linewidth=2)
-        plt.plot(self.history.history[val_loss_key], label="Validation Loss", linewidth=2)
+        epochs = np.arange(1, len(self.history.history[train_loss_key]) + 1)
+        epoch_xlim = (0.5, 1.5) if len(epochs) == 1 else (1, int(epochs[-1]))
+        plt.plot(epochs, self.history.history[train_loss_key], label="Training Loss", linewidth=2)
+        plt.plot(epochs, self.history.history[val_loss_key], label="Validation Loss", linewidth=2)
         plt.title("Event Time Prediction - Loss Over Time", fontsize=14)
         plt.xlabel("Epoch", fontsize=12)
         plt.ylabel("Loss (MAE)", fontsize=12)
+        plt.xlim(*epoch_xlim)
         plt.legend(fontsize=11)
         plt.grid(True, alpha=0.3)
         

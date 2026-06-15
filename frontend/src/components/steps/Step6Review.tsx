@@ -142,7 +142,7 @@ export default function Step6Review({
       }`
     : "-";
   const samplingLabel = usesGnnExplainability
-    ? `${explainabilityConfig.local_explanation_samples} local samples, ${explainabilityConfig.global_explanation_sample_percent}% global sample, ${explainabilityConfig.evaluation_samples} evaluation samples`
+    ? `${explainabilityConfig.local_explanation_samples} local samples, ${explainabilityConfig.global_explanation_sample_percent}% global sample, ${explainabilityConfig.evaluation_samples} evaluation samples, ${explainabilityConfig.evaluation_sampling_strategy} sampling, seed ${explainabilityConfig.evaluation_random_seed}`
     : usesTransformerExplainability
     ? `${explainabilityConfig.transformer_explanation_samples} samples, ${explainabilityConfig.evaluation_sampling_strategy} sampling, seed ${explainabilityConfig.evaluation_random_seed}`
     : "-";

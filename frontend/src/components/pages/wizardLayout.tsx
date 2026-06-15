@@ -275,25 +275,24 @@ function validateExplainabilityConfig(
 ): boolean {
   if (!method) return false;
   if (method === "none") return true;
+  const strategyOk = ["evenly_spaced", "random", "manual", "diverse"].includes(
+    cfg.evaluation_sampling_strategy
+  );
+  const seedOk = Number.isInteger(cfg.evaluation_random_seed);
+  const protocolOk = cfg.evaluation_protocol_name.trim().length > 0;
+  const manualOk =
+    cfg.evaluation_sampling_strategy !== "manual" ||
+    (cfg.evaluation_sample_indices.trim().length > 0 &&
+      cfg.evaluation_sample_indices
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .every((part) => /^\d+$/.test(part)));
+
   if (model === "transformer") {
     const sampleOk =
       Number.isInteger(cfg.transformer_explanation_samples) &&
       cfg.transformer_explanation_samples >= 1;
-    const strategyOk = ["evenly_spaced", "random", "manual", "diverse"].includes(
-      cfg.evaluation_sampling_strategy
-    );
-    const seedOk = Number.isInteger(cfg.evaluation_random_seed);
-    const protocolOk =
-      cfg.evaluation_protocol_name.trim().length > 0 &&
-      cfg.evaluation_protocol_version.trim().length > 0;
-    const manualOk =
-      cfg.evaluation_sampling_strategy !== "manual" ||
-      (cfg.evaluation_sample_indices.trim().length > 0 &&
-        cfg.evaluation_sample_indices
-          .split(",")
-          .map((part) => part.trim())
-          .filter(Boolean)
-          .every((part) => /^\d+$/.test(part)));
     return sampleOk && strategyOk && seedOk && protocolOk && manualOk;
   }
   if (model !== "gnn") return true;
@@ -309,7 +308,7 @@ function validateExplainabilityConfig(
     cfg.max_prefix_length === null ||
     (Number.isInteger(cfg.max_prefix_length) && cfg.max_prefix_length >= cfg.min_prefix_length);
 
-  return localOk && globalOk && evaluationOk && minOk && maxOk;
+  return localOk && globalOk && evaluationOk && minOk && maxOk && strategyOk && seedOk && protocolOk && manualOk;
 }
 
 export default function WizardLayout() {
@@ -377,9 +376,6 @@ export default function WizardLayout() {
       evaluation_random_seed: 42,
       evaluation_sample_indices: "",
       evaluation_protocol_name: "Perturbation-Based Explainability Evaluation",
-      evaluation_protocol_version: "1.0",
-      evaluation_protocol_notes:
-        "Fixed sampling protocol with zero masking and k-values 5, 10, 15, 20, 25.",
     }),
     []
   );
