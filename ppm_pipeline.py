@@ -495,9 +495,9 @@ def run_next_activity_prediction(
             scaler=getattr(predictor, 'scaler', None),
             feature_config=feature_config,
             evaluation_config=explainability_config,
-            local_num_samples=explainability_config.get("local_explanation_samples") or None,
+            local_num_samples=explainability_config.get("local_explanation_samples", 10),
             global_sample_percent=explainability_config.get("global_explanation_sample_percent", 100),
-            min_prefix_length=explainability_config.get("min_prefix_length") or None,
+            min_prefix_length=explainability_config.get("min_prefix_length", 5),
             max_prefix_length=explainability_config.get("max_prefix_length") or None,
         )
 
@@ -605,9 +605,9 @@ def run_event_time_prediction(
             feature_config=feature_config,
             timestamps=data.get('X_time_test'),
             evaluation_config=explainability_config,
-            local_num_samples=explainability_config.get("local_explanation_samples") or None,
+            local_num_samples=explainability_config.get("local_explanation_samples", 10),
             global_sample_percent=explainability_config.get("global_explanation_sample_percent", 100),
-            min_prefix_length=explainability_config.get("min_prefix_length") or None,
+            min_prefix_length=explainability_config.get("min_prefix_length", 5),
             max_prefix_length=explainability_config.get("max_prefix_length") or None,
         )
 
@@ -715,9 +715,9 @@ def run_remaining_time_prediction(
             feature_config=feature_config,
             timestamps=data.get('X_time_test'),
             evaluation_config=explainability_config,
-            local_num_samples=explainability_config.get("local_explanation_samples") or None,
+            local_num_samples=explainability_config.get("local_explanation_samples", 10),
             global_sample_percent=explainability_config.get("global_explanation_sample_percent", 100),
-            min_prefix_length=explainability_config.get("min_prefix_length") or None,
+            min_prefix_length=explainability_config.get("min_prefix_length", 5),
             max_prefix_length=explainability_config.get("max_prefix_length") or None,
         )
 
@@ -853,12 +853,12 @@ def run_gnn_unified_prediction(
             predictor.device,
             vocabularies=data.get('vocabs'),
             num_samples=explainability_config.get('explainability_samples', 10),
-            local_num_samples=explainability_config.get('local_explanation_samples', 5),
+            local_num_samples=explainability_config.get('local_explanation_samples', 10),
             methods=explainability_method,
             tasks=tasks_to_explain,
             global_sample_percent=explainability_config.get('global_explanation_sample_percent', 1),
-            evaluation_sample_count=explainability_config.get('evaluation_samples'),
-            min_prefix_length=explainability_config.get('min_prefix_length'),
+            evaluation_sample_count=explainability_config.get('evaluation_samples', 10),
+            min_prefix_length=explainability_config.get('min_prefix_length', 5),
             max_prefix_length=explainability_config.get('max_prefix_length'),
             evaluation_sampling_strategy=explainability_config.get('evaluation_sampling_strategy', 'evenly_spaced'),
             evaluation_random_seed=explainability_config.get('evaluation_random_seed', 42),

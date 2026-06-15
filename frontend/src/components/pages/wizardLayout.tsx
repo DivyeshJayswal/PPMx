@@ -366,10 +366,10 @@ export default function WizardLayout() {
 
   const defaultExplainabilityConfig = useMemo<ExplainabilityConfig>(
     () => ({
-      local_explanation_samples: 5,
+      local_explanation_samples: 10,
       global_explanation_sample_percent: 1,
       evaluation_samples: 10,
-      min_prefix_length: 1,
+      min_prefix_length: 5,
       max_prefix_length: null,
       transformer_explanation_samples: 50,
       evaluation_sampling_strategy: "evenly_spaced",
@@ -411,8 +411,19 @@ export default function WizardLayout() {
   );
 
   /* -------------------- NAVIGATION -------------------- */
-  const nextStep = () => setStep((prev) => Math.min(prev + 1, TOTAL_STEPS - 1));
-  const prevStep = () => setStep((prev) => Math.max(prev - 1, 0));
+  const nextStep = () => {
+    setStep((prev) => {
+      const next = Math.min(prev + 1, TOTAL_STEPS - 1);
+      if (next === TOTAL_STEPS - 1) {
+        setViewMode("results");
+      }
+      return next;
+    });
+  };
+  const prevStep = () => {
+    setViewMode("wizard");
+    setStep((prev) => Math.max(prev - 1, 0));
+  };
 
   /* -------------------- VALIDATION -------------------- */
   const isStepValid = (stepIndex = step) => {
@@ -746,7 +757,7 @@ export default function WizardLayout() {
   }, [autoDownloadedRunId, pipelineStatus, runId]);
 
   /* -------------------- RENDER -------------------- */
-  const showResults = viewMode === "results";
+  const showResults = viewMode === "results" || step === TOTAL_STEPS - 1;
 
   return (
     <div className="flex h-screen flex-col">

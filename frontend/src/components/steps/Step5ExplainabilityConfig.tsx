@@ -79,7 +79,7 @@ export default function Step5ExplainabilityConfig({
                 <ParameterField
                   label="Local explanation samples"
                   value={cfg.local_explanation_samples}
-                  placeholder="5"
+                  placeholder="10"
                   min="0"
                   onChange={(e) => update("local_explanation_samples", n(e.target.value))}
                   helpText="0 disables local plots. Values above the filtered graph count are clamped automatically."
@@ -104,7 +104,7 @@ export default function Step5ExplainabilityConfig({
                 <ParameterField
                   label="Minimum prefix length"
                   value={cfg.min_prefix_length}
-                  placeholder="1"
+                  placeholder="5"
                   min="1"
                   onChange={(e) => update("min_prefix_length", n(e.target.value))}
                   helpText="Only prefixes with length at least this value are considered."
@@ -157,7 +157,7 @@ export default function Step5ExplainabilityConfig({
                 <ParameterField
                   label="Local explanation samples"
                   value={cfg.local_explanation_samples}
-                  placeholder="5"
+                  placeholder="10"
                   min="0"
                   onChange={(e) => update("local_explanation_samples", n(e.target.value))}
                   helpText="Number of test sequences for local LIME plots. 0 disables local plots. Values above the filtered sequence count are clamped automatically."
@@ -182,7 +182,7 @@ export default function Step5ExplainabilityConfig({
                 <ParameterField
                   label="Minimum prefix length"
                   value={cfg.min_prefix_length}
-                  placeholder="1"
+                  placeholder="5"
                   min="1"
                   onChange={(e) => update("min_prefix_length", n(e.target.value))}
                   helpText="Only sequences with at least this many non-padding tokens are considered."
