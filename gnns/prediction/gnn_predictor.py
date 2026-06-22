@@ -26,6 +26,12 @@ def _signed_log1p(value):
     return np.sign(v) * np.log1p(abs(v))
 
 
+def _normalize_categorical_value(value):
+    if pd.isna(value):
+        return "NaN"
+    return str(value)
+
+
 class GraphFolderDataset(Dataset):
 
     def __init__(self, folder: str):
@@ -52,11 +58,14 @@ class GraphFolderDataset(Dataset):
 class GNNPredictor:
 
     def __init__(self, hidden_channels=64, dropout=0.1, lr=4e-4,
-                 loss_weights=(1.0, 0.1, 0.1)):
+                 loss_weights=(1.0, 0.1, 0.1), num_layers=2, heads=4):
         self.hidden_channels = hidden_channels
         self.dropout = dropout
         self.lr = lr
         self.loss_weights = loss_weights
+        self.num_layers = num_layers
+        self.heads = heads
+        self.task_name = "unified"
 
         self.model = None
         self.optimizer = None
@@ -112,6 +121,7 @@ class GNNPredictor:
                 "Timestamp",
                 "next_activity",
                 "next_timestamp",
+                "next_event_time_target",
                 "remaining_time_target",
                 *trace_cols,
             ]
@@ -131,13 +141,20 @@ class GNNPredictor:
                 for k in range(1, trace_len):
                     label_next_activity = activities[k]
                     next_timestamp = timestamps[k]
+                    prev_timestamp = timestamps[k - 1]
                     prefix_current_timestamp = timestamps[k - 1]
+                    next_delta = next_timestamp - prev_timestamp
                     delta = timestamps[-1] - prefix_current_timestamp
+                    if hasattr(next_delta, "total_seconds"):
+                        next_delta_seconds = float(next_delta.total_seconds())
+                    else:
+                        next_delta_seconds = float(next_delta / np.timedelta64(1, "s"))
                     if hasattr(delta, "total_seconds"):
                         delta_seconds = float(delta.total_seconds())
                     else:
                         # numpy.timedelta64 path
                         delta_seconds = float(delta / np.timedelta64(1, "s"))
+                    next_event_time_target = max(0.0, next_delta_seconds)
                     remaining_time_target = max(0.0, delta_seconds)
                     for pos in range(k):
                         row = {
@@ -150,6 +167,7 @@ class GNNPredictor:
                             "Timestamp": timestamps[pos],
                             "next_activity": label_next_activity,
                             "next_timestamp": next_timestamp,
+                            "next_event_time_target": next_event_time_target,
                             "remaining_time_target": remaining_time_target,
                         }
                         if trace_attrs:
@@ -185,10 +203,21 @@ class GNNPredictor:
         prefix_df = build_prefix_df(base_df, scope_name="full dataset")
         
         vocabs = {}
-        all_activities = set(prefix_df["Activity"].unique().tolist()) | set(prefix_df["next_activity"].unique().tolist())
+        all_activities = {
+            _normalize_categorical_value(v)
+            for v in prefix_df["Activity"].unique().tolist()
+        } | {
+            _normalize_categorical_value(v)
+            for v in prefix_df["next_activity"].unique().tolist()
+        }
         values = sorted(all_activities)
         vocabs["Activity"] = {v: i for i, v in enumerate(values)}
-        res_vals = sorted(prefix_df["Resource"].unique().tolist())
+        res_vals = sorted(
+            {
+                _normalize_categorical_value(v)
+                for v in prefix_df["Resource"].unique().tolist()
+            }
+        )
         vocabs["Resource"] = {v: i for i, v in enumerate(res_vals)}
         
         IGNORE_COLS = {
@@ -201,6 +230,7 @@ class GNNPredictor:
             "Timestamp",
             "next_activity",
             "next_timestamp",
+            "next_event_time_target",
             "remaining_time_target",
             "__ts_log",
         }
@@ -209,7 +239,12 @@ class GNNPredictor:
         for col in trace_attributes:
             if pd.api.types.is_numeric_dtype(prefix_df[col]):
                 continue
-            vals = sorted(prefix_df[col].fillna("NaN").unique().tolist())
+            vals = sorted(
+                {
+                    _normalize_categorical_value(v)
+                    for v in prefix_df[col].unique().tolist()
+                }
+            )
             vocabs[col] = {v: i for i, v in enumerate(vals)}
         self.vocabs = vocabs
         print(f"Vocabularies: Activities={len(vocabs['Activity'])}, Resources={len(vocabs['Resource'])}")
@@ -219,25 +254,37 @@ class GNNPredictor:
             graphs = []
             
             print(f"Building {groups.ngroups:,} graphs...")
-            for (_, _), p in tqdm(groups, desc="Building graphs", ncols=100):
+            for (case_id, prefix_id), p in tqdm(groups, desc="Building graphs", ncols=100):
                 p = p.sort_values("prefix_pos")
-                
+                 
                 data = HeteroData()
                 k = len(p)
+                data.case_id = str(case_id)
+                data.prefix_id = int(prefix_id)
                 
                 act_map = vocabs["Activity"]
                 res_map = vocabs["Resource"]
                 
-                act_ids = np.array([act_map[a] for a in p["Activity"]])
+                act_ids = np.array([
+                    act_map[_normalize_categorical_value(a)] for a in p["Activity"]
+                ])
                 data["activity"].x = F.one_hot(torch.tensor(act_ids, dtype=torch.long), num_classes=len(act_map)).float()
                 data["activity"].num_nodes = k
                 
-                res_ids = np.array([res_map[r] for r in p["Resource"]])
+                res_ids = np.array([
+                    res_map[_normalize_categorical_value(r)] for r in p["Resource"]
+                ])
                 data["resource"].x = F.one_hot(torch.tensor(res_ids, dtype=torch.long), num_classes=len(res_map)).float()
                 data["resource"].num_nodes = k
                 
                 data["time"].x = torch.tensor(p["__ts_log"].to_numpy(), dtype=torch.float32).unsqueeze(1)
                 data["time"].num_nodes = k
+                prefix_times = pd.to_datetime(p["Timestamp"])
+                prefix_start = prefix_times.iloc[0]
+                relative_seconds = (
+                    (prefix_times - prefix_start).dt.total_seconds().to_numpy(dtype=np.float32)
+                )
+                data["time"].display_seconds = torch.tensor(relative_seconds, dtype=torch.float32)
                 
                 trace_features = []
                 first = p.iloc[0]
@@ -246,7 +293,7 @@ class GNNPredictor:
                         continue
                     val = first[col]
                     if col in vocabs:
-                        idx = vocabs[col].get(val, 0)
+                        idx = vocabs[col].get(_normalize_categorical_value(val), 0)
                         trace_features.append(F.one_hot(torch.tensor(idx), num_classes=len(vocabs[col])).float())
                     else:
                         try:
@@ -280,15 +327,15 @@ class GNNPredictor:
                 data["resource", "to_trace", "trace"].edge_index = torch.stack([idx, trace_src])
                 data["time", "to_trace", "trace"].edge_index = torch.stack([idx, trace_src])
                 
-                next_act_name = p.iloc[0]["next_activity"]
+                next_act_name = _normalize_categorical_value(p.iloc[0]["next_activity"])
                 if next_act_name not in act_map:
                     print(f"Warning: Activity '{next_act_name}' not in vocabulary. Skipping graph.")
                     continue
                 next_act = act_map[next_act_name]
                 data.y_activity = torch.tensor([next_act], dtype=torch.long)
                 
-                t_next = p.iloc[0]["next_timestamp"].timestamp()
-                data.y_timestamp = torch.tensor([np.log1p(t_next)], dtype=torch.float32)
+                next_event_time = float(p.iloc[0]["next_event_time_target"])
+                data.y_timestamp = torch.tensor([np.log1p(next_event_time)], dtype=torch.float32)
                 
                 remaining = float(p.iloc[0]["remaining_time_target"])
                 data.y_remaining_time = torch.tensor([np.log1p(remaining)], dtype=torch.float32)
@@ -387,6 +434,8 @@ class GNNPredictor:
             num_activity_classes=num_classes,
             dropout=self.dropout,
             loss_weights=self.loss_weights,
+            num_layers=self.num_layers,
+            heads=self.heads,
         ).to(self.device)
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
@@ -489,13 +538,17 @@ class GNNPredictor:
             self.history['val_mae_time'].append(val_metrics['mae_time'])
             self.history['val_mae_rem'].append(val_metrics['mae_rem'])
 
-            print(
-                f"Epoch {epoch:03d} | "
-                f"Train Acc: {train_metrics['accuracy']*100:.2f}% | "
-                f"Val Acc: {val_metrics['accuracy']*100:.2f}% | "
-                f"MAE Time: {val_metrics['mae_time']:.4f} | "
-                f"MAE Rem: {val_metrics['mae_rem']:.4f}"
-            )
+            log_parts = [
+                f"Epoch {epoch:03d}",
+                f"Train Loss: {train_loss:.4f}",
+                f"Train Acc: {train_metrics['accuracy']*100:.2f}%",
+                f"Val Loss: {val_metrics['loss']:.4f}",
+                f"Val Acc: {val_metrics['accuracy']*100:.2f}%",
+            ]
+            if self.task_name not in {"next_activity", "custom_activity"}:
+                log_parts.append(f"MAE Time: {val_metrics['mae_time']:.4f}")
+                log_parts.append(f"MAE Rem: {val_metrics['mae_rem']:.4f}")
+            print(" | ".join(log_parts))
 
             if val_metrics['loss'] < best_val_loss:
                 best_val_loss = val_metrics['loss']
@@ -528,38 +581,65 @@ class GNNPredictor:
         torch.save(self.model.state_dict(), model_path)
         print(f"Model saved to: {model_path}")
 
-    def plot_training_history(self, output_dir):
+    def plot_training_history(self, output_dir, task="unified"):
         os.makedirs(output_dir, exist_ok=True)
+        epochs = np.arange(1, len(self.history['train_loss']) + 1)
+        epoch_xlim = (0.5, 1.5) if len(epochs) == 1 else (1, int(epochs[-1]))
 
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        if task in {"next_activity", "custom_activity"}:
+            fig, axes = plt.subplots(1, 2, figsize=(15, 5))
 
-        axes[0, 0].plot(self.history['train_acc'], label='Train')
-        axes[0, 0].plot(self.history['val_acc'], label='Validation')
-        axes[0, 0].set_title('Activity Prediction Accuracy')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Accuracy')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3)
+            axes[0].plot(epochs, self.history['train_acc'], label='Train')
+            axes[0].plot(epochs, self.history['val_acc'], label='Validation')
+            axes[0].set_title('Activity Prediction Accuracy')
+            axes[0].set_xlabel('Epoch')
+            axes[0].set_ylabel('Accuracy')
+            axes[0].set_xlim(*epoch_xlim)
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
 
-        axes[0, 1].plot(self.history['train_loss'], label='Train')
-        axes[0, 1].plot(self.history['val_loss'], label='Validation')
-        axes[0, 1].set_title('Total Loss')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('Loss')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True, alpha=0.3)
+            axes[1].plot(epochs, self.history['train_loss'], label='Train')
+            axes[1].plot(epochs, self.history['val_loss'], label='Validation')
+            axes[1].set_title('Total Loss')
+            axes[1].set_xlabel('Epoch')
+            axes[1].set_ylabel('Loss')
+            axes[1].set_xlim(*epoch_xlim)
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+        else:
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
-        axes[1, 0].plot(self.history['val_mae_time'])
-        axes[1, 0].set_title('Event Time MAE (Validation)')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('MAE')
-        axes[1, 0].grid(True, alpha=0.3)
+            axes[0, 0].plot(epochs, self.history['train_acc'], label='Train')
+            axes[0, 0].plot(epochs, self.history['val_acc'], label='Validation')
+            axes[0, 0].set_title('Activity Prediction Accuracy')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('Accuracy')
+            axes[0, 0].set_xlim(*epoch_xlim)
+            axes[0, 0].legend()
+            axes[0, 0].grid(True, alpha=0.3)
 
-        axes[1, 1].plot(self.history['val_mae_rem'])
-        axes[1, 1].set_title('Remaining Time MAE (Validation)')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('MAE')
-        axes[1, 1].grid(True, alpha=0.3)
+            axes[0, 1].plot(epochs, self.history['train_loss'], label='Train')
+            axes[0, 1].plot(epochs, self.history['val_loss'], label='Validation')
+            axes[0, 1].set_title('Total Loss')
+            axes[0, 1].set_xlabel('Epoch')
+            axes[0, 1].set_ylabel('Loss')
+            axes[0, 1].set_xlim(*epoch_xlim)
+            axes[0, 1].legend()
+            axes[0, 1].grid(True, alpha=0.3)
+
+            axes[1, 0].plot(epochs, self.history['val_mae_time'])
+            axes[1, 0].set_title('Event Time MAE (Validation)')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('MAE')
+            axes[1, 0].set_xlim(*epoch_xlim)
+            axes[1, 0].grid(True, alpha=0.3)
+
+            axes[1, 1].plot(epochs, self.history['val_mae_rem'])
+            axes[1, 1].set_title('Remaining Time MAE (Validation)')
+            axes[1, 1].set_xlabel('Epoch')
+            axes[1, 1].set_ylabel('MAE')
+            axes[1, 1].set_xlim(*epoch_xlim)
+            axes[1, 1].grid(True, alpha=0.3)
 
         plt.tight_layout()
         output_path = os.path.join(output_dir, "gnn_training_history.png")

@@ -1,2208 +1,2603 @@
-import os
 import json
+import os
 import re
+import textwrap
+from dataclasses import dataclass
+
+import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import seaborn as sns
+from matplotlib.patches import FancyArrowPatch
 from tqdm import tqdm
-from sklearn.linear_model import Lasso
+import graphviz
 
-plt.style.use('seaborn-v0_8-whitegrid')
-plt.rcParams.update({
-    'font.family': 'sans-serif',
-    'font.size': 10,
-    'axes.titlesize': 14,
-    'axes.labelsize': 12,
-    'xtick.labelsize': 9,
-    'ytick.labelsize': 9,
-    'legend.fontsize': 10,
-    'figure.titlesize': 16
-})
+try:
+    from torch_geometric.explain import Explainer, GNNExplainer
+except ImportError as exc:
+    Explainer = None
+    GNNExplainer = None
+    _PYG_EXPLAIN_IMPORT_ERROR = exc
+else:
+    _PYG_EXPLAIN_IMPORT_ERROR = None
+
+
+plt.style.use("seaborn-v0_8-whitegrid")
+plt.rcParams.update({"font.size": 10, "font.family": "sans-serif"})
 
 
 def _dir_has_png(path):
     if not os.path.isdir(path):
         return False
-    for _, _, files in os.walk(path):
-        if any(name.lower().endswith(".png") for name in files):
-            return True
-    return False
+    return any(name.lower().endswith(".png") for name in os.listdir(path))
 
 
-def _write_placeholder_plot(output_path, title, lines=None):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.axis("off")
-    body = [title] + (lines or [])
-    ax.text(0.5, 0.5, "\n".join(body), ha="center", va="center", fontsize=12)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
-    plt.close()
+def _remove_file_if_exists(path):
+    if os.path.isfile(path):
+        os.remove(path)
 
-class GradientExplainer:
-    def __init__(self, model, device, vocabularies=None):
-        self.model = model
-        self.device = device
-        
-        if callable(vocabularies):
-            try:
-                self.vocabs = vocabularies()
-            except:
-                self.vocabs = {}
-        else:
-            self.vocabs = vocabularies or {}
-        if not isinstance(self.vocabs, dict):
-            self.vocabs = {}
 
-    def _get_activity_name(self, idx):
-        if 'Activity' in self.vocabs:
-            inv_vocab = {v: k for k, v in self.vocabs['Activity'].items()}
-            name = inv_vocab.get(int(idx), f"Act_{idx}")
-            return name[:18] + ".." if len(name) > 18 else name
-        return f"Activity_{idx}"
+def _serialize_scalar(value):
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    return value
 
-    def _get_resource_name(self, idx):
-        if 'Resource' in self.vocabs:
-            inv_vocab = {v: k for k, v in self.vocabs['Resource'].items()}
-            name = inv_vocab.get(int(idx), f"Res_{idx}")
-            return name[:12] + ".." if len(name) > 12 else name
-        return f"Resource_{idx}"
 
-    def explain_time_series_with_features(self, graphs, task='event_time', num_samples=50):
-        self.model.eval()
-        
-        time_step_data = []
-        predictions = []
-        true_values = []
-        
-        sample_indices = np.random.choice(len(graphs), min(num_samples, len(graphs)), replace=False)
-        selected_graphs = [graphs[i] for i in sample_indices]
-        
-        print(f"Computing feature-level contributions for {len(selected_graphs)} graphs ({task})...")
-        
-        for graph in tqdm(selected_graphs, desc=f"Analyzing ({task})"):
-            graph = graph.to(self.device)
-            seq_len = graph['activity'].x.shape[0]
-            
-            for key in graph.x_dict:
-                if key in ['activity', 'resource', 'time']:
-                    graph.x_dict[key] = graph.x_dict[key].detach().clone()
-                    graph.x_dict[key].requires_grad = True
-            
-            out = self.model(graph)
-            
-            if task == 'event_time':
-                score = out[1]
-                true_val = graph.y_timestamp.item()
-            elif task == 'remaining_time':
-                score = out[2]
-                true_val = graph.y_remaining_time.item()
-            else:
-                continue
-            
-            self.model.zero_grad()
-            score.backward()
-            
-            with torch.no_grad():
-                for step in range(seq_len):
-                    step_info = {'step': step}
-                    contrib_sum = 0.0
-                    
-                    if task in ['event_time', 'remaining_time']:
-                        if 'time' in graph.x_dict and graph.x_dict['time'].grad is not None:
-                            time_grad = graph.x_dict['time'].grad[step]
-                            time_inp = graph.x_dict['time'][step]
-                            contrib_sum += (time_grad * time_inp).abs().sum().item()
-                            step_info['timestamp'] = time_inp.item()
-                        
-                        if 'activity' in graph.x_dict:
-                            act_inp = graph.x_dict['activity'][step]
-                            act_idx = act_inp.argmax().item()
-                            step_info['activity'] = self._get_activity_name(act_idx)
-                        
-                        if 'resource' in graph.x_dict:
-                            res_inp = graph.x_dict['resource'][step]
-                            res_idx = res_inp.argmax().item()
-                            step_info['resource'] = self._get_resource_name(res_idx)
-                    
-                    else:
-                        if 'activity' in graph.x_dict and graph.x_dict['activity'].grad is not None:
-                            act_grad = graph.x_dict['activity'].grad[step]
-                            act_inp = graph.x_dict['activity'][step]
-                            contrib_sum += (act_grad * act_inp).abs().sum().item()
-                            act_idx = act_inp.argmax().item()
-                            step_info['activity'] = self._get_activity_name(act_idx)
-                        
-                        if 'resource' in graph.x_dict and graph.x_dict['resource'].grad is not None:
-                            res_grad = graph.x_dict['resource'].grad[step]
-                            res_inp = graph.x_dict['resource'][step]
-                            contrib_sum += (res_grad * res_inp).abs().sum().item()
-                            res_idx = res_inp.argmax().item()
-                            step_info['resource'] = self._get_resource_name(res_idx)
-                        
-                        if 'time' in graph.x_dict and graph.x_dict['time'].grad is not None:
-                            time_grad = graph.x_dict['time'].grad[step]
-                            time_inp = graph.x_dict['time'][step]
-                            contrib_sum += (time_grad * time_inp).abs().sum().item()
-                            step_info['timestamp'] = time_inp.item()
-                    
-                    step_info['contribution'] = contrib_sum
-                    time_step_data.append(step_info)
-                
-                predictions.append(score.item())
-                true_values.append(true_val)
-        
-        df = pd.DataFrame(time_step_data)
-        
-        step_summary = []
-        for step in range(df['step'].max() + 1):
-            step_data = df[df['step'] == step]
-            
-            summary = {
-                'step': step,
-                'avg_contribution': step_data['contribution'].mean(),
-                'std_contribution': step_data['contribution'].std(),
-            }
-            
-            if 'activity' in step_data.columns:
-                top_activity = step_data['activity'].mode()
-                if len(top_activity) > 0:
-                    summary['top_activity'] = top_activity.iloc[0]
-                    summary['activity_freq'] = (step_data['activity'] == top_activity.iloc[0]).sum() / len(step_data)
-                else:
-                    summary['top_activity'] = "N/A"
-                    summary['activity_freq'] = 0
-            
-            if 'resource' in step_data.columns:
-                top_resource = step_data['resource'].mode()
-                if len(top_resource) > 0:
-                    summary['top_resource'] = top_resource.iloc[0]
-                    summary['resource_freq'] = (step_data['resource'] == top_resource.iloc[0]).sum() / len(step_data)
-                else:
-                    summary['top_resource'] = "N/A"
-                    summary['resource_freq'] = 0
-            
-            step_summary.append(summary)
-        
-        summary_df = pd.DataFrame(step_summary)
-        
-        return {
-            'summary': summary_df,
-            'detailed_data': df,
-            'predictions': predictions,
-            'true_values': true_values
-        }
-    
-    def explain_individual_sample(self, graph, task='event_time'):
-        self.model.eval()
-        graph = graph.to(self.device)
-        
-        seq_len = graph['activity'].x.shape[0]
-        
-        for key in graph.x_dict:
-            if key in ['activity', 'resource', 'time']:
-                graph.x_dict[key] = graph.x_dict[key].detach().clone()
-                graph.x_dict[key].requires_grad = True
-        
-        out = self.model(graph)
-        
-        if task == 'event_time':
-            score = out[1]
-            true_val = graph.y_timestamp.item()
-        elif task == 'remaining_time':
-            score = out[2]
-            true_val = graph.y_remaining_time.item()
-        elif task == 'activity':
-            predicted_class = out[0].argmax()
-            score = out[0][predicted_class]
-            true_val = graph.y_activity.item()
-        else:
-            return None, None, None, None
-        
-        self.model.zero_grad()
-        score.backward()
-        
-        step_contributions = []
-        step_info = []
-        
-        with torch.no_grad():
-            for step in range(seq_len):
-                contrib_sum = 0.0
-                info = {'step': step}
-                
-                if task in ['event_time', 'remaining_time']:
-                    if 'time' in graph.x_dict and graph.x_dict['time'].grad is not None:
-                        time_grad = graph.x_dict['time'].grad[step]
-                        time_inp = graph.x_dict['time'][step]
-                        contrib_sum += (time_grad * time_inp).abs().sum().item()
-                        info['timestamp'] = time_inp.item()
-                    
-                    if 'activity' in graph.x_dict:
-                        act_inp = graph.x_dict['activity'][step]
-                        act_idx = act_inp.argmax().item()
-                        info['activity'] = self._get_activity_name(act_idx)
-                    
-                    if 'resource' in graph.x_dict:
-                        res_inp = graph.x_dict['resource'][step]
-                        res_idx = res_inp.argmax().item()
-                        info['resource'] = self._get_resource_name(res_idx)
-                
-                elif task == 'activity':
-                    if 'activity' in graph.x_dict and graph.x_dict['activity'].grad is not None:
-                        act_grad = graph.x_dict['activity'].grad[step]
-                        act_inp = graph.x_dict['activity'][step]
-                        contrib_sum += (act_grad * act_inp).abs().sum().item()
-                        act_idx = act_inp.argmax().item()
-                        info['activity'] = self._get_activity_name(act_idx)
-                    
-                    if 'resource' in graph.x_dict:
-                        res_inp = graph.x_dict['resource'][step]
-                        res_idx = res_inp.argmax().item()
-                        info['resource'] = self._get_resource_name(res_idx)
-                    
-                    if 'time' in graph.x_dict:
-                        time_inp = graph.x_dict['time'][step]
-                        info['timestamp'] = time_inp.item()
-                
-                else:
-                    if 'activity' in graph.x_dict and graph.x_dict['activity'].grad is not None:
-                        act_grad = graph.x_dict['activity'].grad[step]
-                        act_inp = graph.x_dict['activity'][step]
-                        contrib_sum += (act_grad * act_inp).abs().sum().item()
-                        act_idx = act_inp.argmax().item()
-                        info['activity'] = self._get_activity_name(act_idx)
-                    
-                    if 'resource' in graph.x_dict and graph.x_dict['resource'].grad is not None:
-                        res_grad = graph.x_dict['resource'].grad[step]
-                        res_inp = graph.x_dict['resource'][step]
-                        contrib_sum += (res_grad * res_inp).abs().sum().item()
-                        res_idx = res_inp.argmax().item()
-                        info['resource'] = self._get_resource_name(res_idx)
-                    
-                    if 'time' in graph.x_dict and graph.x_dict['time'].grad is not None:
-                        time_grad = graph.x_dict['time'].grad[step]
-                        time_inp = graph.x_dict['time'][step]
-                        contrib_sum += (time_grad * time_inp).abs().sum().item()
-                        info['timestamp'] = time_inp.item()
-                
-                step_contributions.append(contrib_sum)
-                step_info.append(info)
-        
-        return np.array(step_contributions), score.item(), true_val, step_info
-    
-    def plot_individual_gradient_explanation(self, contributions, pred, true_val, step_info, output_dir, task, sample_id):
-        os.makedirs(output_dir, exist_ok=True)
-        
-        if contributions is None:
-            return
-        
-        num_steps = len(contributions)
-        
-        timestamps = []
-        for info in step_info:
-            if 'timestamp' in info:
-                timestamps.append(info['timestamp'])
-            else:
-                timestamps.append(None)
-        
-        fig, ax = plt.subplots(figsize=(18, 8))
-        
-        centered_contrib = contributions - np.mean(contributions)
-        
-        if task in ['event_time', 'remaining_time']:
-            x_labels = []
-            for i, info in enumerate(step_info):
-                if timestamps[i] is not None:
-                    timestamp = timestamps[i]
-                    if timestamp < 1:
-                        x_labels.append(f"{timestamp*24:.1f}h")
-                    else:
-                        x_labels.append(f"Day {timestamp:.1f}")
-                else:
-                    x_labels.append(f"Step {info['step']}")
-        else:
-            x_labels = []
-            for info in step_info:
-                activity = info.get('activity', f"Step_{info['step']}")
-                if len(activity) > 15:
-                    activity = activity[:13] + '..'
-                x_labels.append(activity)
-        
-        time_steps = np.arange(num_steps)
-        positive = np.maximum(centered_contrib, 0)
-        negative = np.minimum(centered_contrib, 0)
-        
-        ax.bar(time_steps, positive, color='#2ca02c', alpha=1.0,
-               label='Increases Prediction', width=0.75, edgecolor='black', linewidth=0.8)
-        ax.bar(time_steps, negative, color='#d62728', alpha=1.0,
-               label='Decreases Prediction', width=0.75, edgecolor='black', linewidth=0.8)
-        ax.axhline(y=0, color='black', linestyle='-', linewidth=2)
-        
-        if task in ['event_time', 'remaining_time']:
-            max_contrib = np.max(np.abs(centered_contrib)) if len(centered_contrib) > 0 else 1
-            label_offset = max_contrib * 0.15
-            
-            for i in range(num_steps):
-                info = step_info[i]
-                activity = info.get('activity', 'N/A')
-                
-                if len(activity) > 12:
-                    activity = activity[:10] + '..'
-                
-                contrib_val = centered_contrib[i]
-                
-                if contrib_val > 0:
-                    y_pos = contrib_val + label_offset
-                    va = 'bottom'
-                else:
-                    y_pos = contrib_val - label_offset
-                    va = 'top'
-                
-                bbox_props = dict(boxstyle='round,pad=0.35', facecolor='lightyellow', 
-                                 edgecolor='gray', linewidth=0.6, alpha=0.85)
-                
-                ax.text(time_steps[i], y_pos, activity, 
-                       ha='center', va=va, fontsize=8, 
-                       bbox=bbox_props, rotation=0)
-        
-        if task in ['event_time', 'remaining_time']:
-            xlabel = 'Event (Timestamp)'
-        else:
-            xlabel = 'Event (Activity + Timestamp)'
-        
-        ax.set_xlabel(xlabel, fontweight='bold', fontsize=14)
-        ax.set_ylabel('Gradient Value (Contribution)', fontweight='bold', fontsize=14)
-        
-        task_name = task.replace('_', ' ').title()
-        ax.set_title(f'Timestep-Level Gradient Attribution - Sample {sample_id}',
-                    fontweight='bold', fontsize=16, pad=20)
-        
-        ax.legend(loc='upper right', framealpha=0.95, fontsize=12)
-        
-        ax.grid(True, alpha=0.3, axis='y', linestyle='--', linewidth=0.8)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        
-        ax.set_xticks(time_steps)
-        ax.set_xticklabels(x_labels, fontsize=9, rotation=45, ha='right')
-        
-        max_contrib = np.max(np.abs(centered_contrib)) if len(centered_contrib) > 0 else 1
-        y_margin = max_contrib * 0.45
-        ax.set_ylim(negative.min() - y_margin if len(negative) > 0 else -1, 
-                   positive.max() + y_margin if len(positive) > 0 else 1)
-        
-        plt.tight_layout()
-        
-        output_path = os.path.join(output_dir, f'gradient_timestep_heatmap_sample_{sample_id}.png')
-        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
-        plt.close()
-        
-        print(f"  [OK] Gradient plot saved: gradient_timestep_heatmap_sample_{sample_id}.png")
-        
-        if step_info:
-            df_info = pd.DataFrame(step_info)
-            df_info['gradient_value'] = centered_contrib
-            
-            if task in ['event_time', 'remaining_time']:
-                cols = ['step']
-                if 'timestamp' in df_info.columns:
-                    cols.append('timestamp')
-                if 'activity' in df_info.columns:
-                    cols.append('activity')
-                cols.append('gradient_value')
-                df_info = df_info[cols]
-                
-                csv_path = os.path.join(output_dir, f'gradient_timestep_sample_{sample_id}_details.csv')
-                with open(csv_path, 'w') as f:
-                    f.write(f"# Task: {task}\n")
-                    f.write(f"# Gradient values from: TIMESTAMP FEATURES ONLY\n")
-                    f.write(f"# Activity shown for context only\n")
-                    df_info.to_csv(f, index=False)
-                
-                print(f"  [OK] Details CSV saved")
-            else:
-                df_info.to_csv(os.path.join(output_dir, f'gradient_timestep_sample_{sample_id}_details.csv'), index=False)
-                print(f"  [OK] Details CSV saved")
+def _inverse_vocab(vocab):
+    if not isinstance(vocab, dict):
+        return {}
+    return {idx: value for value, idx in vocab.items()}
 
-    def plot_with_readable_table(self, results, output_dir, task):
-        os.makedirs(output_dir, exist_ok=True)
-        
-        summary_df = results['summary']
-        predictions = results['predictions']
-        true_values = results['true_values']
-        
-        max_len = len(summary_df)
-        
-        if max_len > 40:
-            bin_size = max(2, max_len // 35)
-            print(f"[INFO] Long sequence ({max_len} steps) - binning into ~{max_len//bin_size} bins")
-            
-            binned_data = []
-            for bin_idx in range((max_len + bin_size - 1) // bin_size):
-                start_step = bin_idx * bin_size
-                end_step = min((bin_idx + 1) * bin_size, max_len)
-                bin_df = summary_df[(summary_df['step'] >= start_step) & (summary_df['step'] < end_step)]
-                
-                binned_data.append({
-                    'step': bin_idx,
-                    'step_range': f"{start_step}-{end_step-1}",
-                    'avg_contribution': bin_df['avg_contribution'].mean(),
-                    'top_activity': bin_df['top_activity'].mode().iloc[0] if len(bin_df['top_activity'].mode()) > 0 else "N/A",
-                })
-            
-            plot_df = pd.DataFrame(binned_data)
-            x_values = plot_df['step'].values
-            contributions = plot_df['avg_contribution'].values
-            activities = plot_df['top_activity'].values
-            xlabel_text = 'Event sequence position (binned)'
-        else:
-            x_values = summary_df['step'].values
-            contributions = summary_df['avg_contribution'].values
-            activities = summary_df['top_activity'].values
-            xlabel_text = 'Event sequence position (BPI Dataset)'
-        
-        mean_val = np.mean(contributions[contributions > 0]) if np.any(contributions > 0) else 0
-        centered_contrib = contributions - mean_val
-        
-        fig, ax = plt.subplots(figsize=(20, 8))
-        
-        positive = np.maximum(centered_contrib, 0)
-        negative = np.minimum(centered_contrib, 0)
-        
-        ax.bar(x_values, positive, color='#d62728', alpha=0.85, 
-               label='Positive', width=0.75, edgecolor='darkred', linewidth=0.8)
-        ax.bar(x_values, negative, color='#1f77b4', alpha=0.85, 
-               label='Negative', width=0.75, edgecolor='darkblue', linewidth=0.8)
-        ax.axhline(y=0, color='black', linestyle='-', linewidth=2)
-        
-        max_contrib = np.max(np.abs(centered_contrib)) if len(centered_contrib) > 0 else 1
-        label_offset = max_contrib * 0.12
-        
-        threshold = np.percentile(np.abs(centered_contrib), 70) if len(centered_contrib) > 0 else 0
-        
-        for i, (x, contrib, activity) in enumerate(zip(x_values, centered_contrib, activities)):
-            if abs(contrib) >= threshold:
-                activity_str = str(activity)
-                if len(activity_str) > 12:
-                    activity_str = activity_str[:10] + '..'
-                
-                if contrib > 0:
-                    y_pos = contrib + label_offset
-                    va = 'bottom'
-                else:
-                    y_pos = contrib - label_offset
-                    va = 'top'
-                
-                bbox_props = dict(boxstyle='round,pad=0.4', facecolor='#FFFACD', 
-                                 edgecolor='black', linewidth=0.8, alpha=0.9)
-                
-                ax.text(x, y_pos, activity_str, 
-                       ha='center', va=va, fontsize=10, fontweight='bold',
-                       rotation=45, bbox=bbox_props)
-        
-        num_samples = len(predictions) if len(predictions) > 0 else 0
-        ax.set_xlabel(xlabel_text, fontweight='bold', fontsize=14)
-        ax.set_ylabel('Feature Contribution', 
-                     fontweight='bold', fontsize=14)
-        
-        task_name = task.replace('_', ' ').title()
-        ax.set_title(f'Graph Neural Network (GNN) Model - SHAP Explainability (Averaged Over {num_samples} Samples)\n{task_name}',
-                    fontweight='bold', fontsize=17, pad=20)
-        
-        ax.legend(loc='upper left', framealpha=0.95, fontsize=12)
-        
-        ax.grid(True, alpha=0.3, axis='y', linestyle='--', linewidth=0.8)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        
-        if len(x_values) <= 30:
-            ax.set_xticks(x_values)
-            if max_len > 40:
-                labels = [plot_df.iloc[i]['step_range'] for i in range(len(x_values))]
-                ax.set_xticklabels(labels, fontsize=9, rotation=30, ha='right')
-            else:
-                ax.set_xticklabels([f'{int(x)}' for x in x_values], fontsize=10)
-        else:
-            skip = max(1, len(x_values) // 30)
-            ax.set_xticks(x_values[::skip])
-            ax.set_xticklabels([f'{int(x)}' for x in x_values[::skip]], fontsize=10)
-        
-        plt.tight_layout()
-        
-        plt.savefig(os.path.join(output_dir, f'feature_level_{task}.png'), 
-                   dpi=300, bbox_inches='tight', facecolor='white')
-        plt.close()
-        
-        print(f"[OK] SHAP-style plot saved")
-        
-        summary_df.to_csv(os.path.join(output_dir, f'feature_summary_{task}.csv'), index=False)
-        print(f"[OK] CSV saved")
 
-    def explain_global_activity(self, graphs, num_samples=50):
-        self.model.eval()
-        importances = {'activity': [], 'resource': []}
-        
-        sample_indices = np.random.choice(len(graphs), min(num_samples, len(graphs)), replace=False)
-        selected_graphs = [graphs[i] for i in sample_indices]
-        
-        print(f"Computing gradients for {len(selected_graphs)} graphs (activity)...")
-        
-        for graph in tqdm(selected_graphs, desc="Activity Analysis"):
-            graph = graph.to(self.device)
-            for key in graph.x_dict:
-                if key in ['activity', 'resource']:
-                    graph.x_dict[key] = graph.x_dict[key].detach().clone()
-                    graph.x_dict[key].requires_grad = True
-            
-            out = self.model(graph)
-            logits = out[0]
-            pred_idx = logits.argmax(dim=1)
-            score = logits[0, pred_idx]
-            
-            self.model.zero_grad()
-            score.backward()
-            
-            with torch.no_grad():
-                for node_type in ['activity', 'resource']:
-                    if node_type in graph.x_dict and graph.x_dict[node_type].grad is not None:
-                        grad = graph.x_dict[node_type].grad
-                        inp = graph.x_dict[node_type]
-                        imp = (grad * inp).abs().sum(dim=0).cpu().numpy()
-                        importances[node_type].append(imp)
-        
-        global_imp = {}
-        for n_type in importances:
-            if len(importances[n_type]) > 0:
-                global_imp[n_type] = np.mean(np.stack(importances[n_type]), axis=0)
-        
-        return global_imp
+def _graphviz_safe_id(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in str(value))
+    return cleaned or "node"
 
-    def plot_global_importance_activity(self, importances, output_dir):
-        os.makedirs(output_dir, exist_ok=True)
-        
-        data = []
-        for n_type, scores in importances.items():
-            top_k_idx = np.argsort(scores)[-10:]
-            for idx in top_k_idx:
-                if scores[idx] > 0:
-                    if n_type == 'activity':
-                        name = self._get_activity_name(idx)
-                    elif n_type == 'resource':
-                        name = self._get_resource_name(idx)
-                    else:
-                        name = f"{n_type}_{idx}"
-                    
-                    data.append({
-                        'Feature': name,
-                        'Importance': scores[idx],
-                        'Type': n_type.capitalize()
-                    })
-        
-        df = pd.DataFrame(data).sort_values('Importance', ascending=True)
-        df.to_csv(os.path.join(output_dir, 'gradient_global_activity.csv'), index=False)
-        
-        if df.empty:
-            print("[WARNING] No gradient importances available for activity.")
-            return
 
-        plt.figure(figsize=(10, 6))
-        colors = {'Activity': '#1f77b4', 'Resource': '#ff7f0e'}
-        
-        plt.barh(df['Feature'], df['Importance'],
-                 color=[colors.get(t, 'grey') for t in df['Type']])
-        
-        plt.title("Global Feature Importance (Next Activity)", fontweight='bold', fontsize=14)
-        plt.xlabel("Mean Gradient Magnitude (Impact)", fontweight='bold')
-        plt.grid(axis='x', linestyle='--', alpha=0.5)
-        
-        from matplotlib.patches import Patch
-        legend_elements = [Patch(facecolor=c, label=l) for l, c in colors.items()]
-        plt.legend(handles=legend_elements, loc='lower right')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'gradient_global_activity.png'), 
-                   dpi=300, bbox_inches='tight', facecolor='white')
-        plt.close()
-        
-        print(f"[OK] Activity bar chart saved")
+class _TaskHeadModel(torch.nn.Module):
+    def __init__(self, base_model, task: str):
+        super().__init__()
+        self.base_model = base_model
+        self.task = task
 
-
-class TemporalGradientExplainer:
-    """Temporal attribution explainer with timestep-level gradients."""
-    def __init__(self, model, device, vocabularies=None, scaler=None):
-        self.model = model
-        self.device = device
-        self.scaler = scaler
-
-        if callable(vocabularies):
-            try:
-                self.vocabs = vocabularies()
-            except Exception:
-                self.vocabs = {}
-        else:
-            self.vocabs = vocabularies or {}
-        if not isinstance(self.vocabs, dict):
-            self.vocabs = {}
-
-    def _get_activity_name(self, idx):
-        if 'Activity' in self.vocabs:
-            inv_vocab = {v: k for k, v in self.vocabs['Activity'].items()}
-            name = inv_vocab.get(int(idx), f"Act_{idx}")
-            return name[:18] + ".." if len(name) > 18 else name
-        return f"Activity_{idx}"
-
-    def _get_resource_name(self, idx):
-        if 'Resource' in self.vocabs:
-            inv_vocab = {v: k for k, v in self.vocabs['Resource'].items()}
-            name = inv_vocab.get(int(idx), f"Res_{idx}")
-            return name[:12] + ".." if len(name) > 12 else name
-        return f"Resource_{idx}"
-
-    def explain_individual_sample(self, graph, task='event_time'):
-        self.model.eval()
-        graph = graph.to(self.device)
-
-        seq_len = graph['activity'].x.shape[0]
-
-        for key in graph.x_dict:
-            if key in ['activity', 'resource', 'time']:
-                graph.x_dict[key] = graph.x_dict[key].detach().clone()
-                graph.x_dict[key].requires_grad = True
-
-        out = self.model(graph)
-
-        if task == 'event_time':
-            score = out[1]
-            if score.numel() > 1:
-                score = score.sum()
-            true_val = graph.y_timestamp.item()
-        elif task == 'remaining_time':
-            score = out[2]
-            if score.numel() > 1:
-                score = score.sum()
-            true_val = graph.y_remaining_time.item()
-        elif task == 'activity':
-            logits = out[0]
-            if logits.dim() > 1:
-                logits = logits[0]
-            predicted_class = logits.argmax()
-            score = logits[predicted_class]
-            if score.numel() > 1:
-                score = score.sum()
-            true_val = graph.y_activity.item()
-        else:
-            return None, None, None, None
-
-        self.model.zero_grad()
-        score.backward()
-
-        step_contributions = []
-        step_info = []
-
-        with torch.no_grad():
-            for step in range(seq_len):
-                contrib_sum = 0.0
-                info = {'step': step}
-
-                if task in ['event_time', 'remaining_time']:
-                    if 'time' in graph.x_dict and graph.x_dict['time'].grad is not None:
-                        time_grad = graph.x_dict['time'].grad[step]
-                        time_inp = graph.x_dict['time'][step]
-                        contrib_sum += (time_grad * time_inp).abs().sum().item()
-                        info['timestamp'] = time_inp.item()
-
-                    if 'activity' in graph.x_dict:
-                        act_inp = graph.x_dict['activity'][step]
-                        act_idx = act_inp.argmax().item()
-                        info['activity'] = self._get_activity_name(act_idx)
-
-                    if 'resource' in graph.x_dict:
-                        res_inp = graph.x_dict['resource'][step]
-                        res_idx = res_inp.argmax().item()
-                        info['resource'] = self._get_resource_name(res_idx)
-
-                elif task == 'activity':
-                    if 'activity' in graph.x_dict and graph.x_dict['activity'].grad is not None:
-                        act_grad = graph.x_dict['activity'].grad[step]
-                        act_inp = graph.x_dict['activity'][step]
-                        contrib_sum += (act_grad * act_inp).abs().sum().item()
-                        act_idx = act_inp.argmax().item()
-                        info['activity'] = self._get_activity_name(act_idx)
-
-                    if 'resource' in graph.x_dict:
-                        res_inp = graph.x_dict['resource'][step]
-                        res_idx = res_inp.argmax().item()
-                        info['resource'] = self._get_resource_name(res_idx)
-
-                    if 'time' in graph.x_dict:
-                        time_inp = graph.x_dict['time'][step]
-                        info['timestamp'] = time_inp.item()
-
-                else:
-                    if 'activity' in graph.x_dict and graph.x_dict['activity'].grad is not None:
-                        act_grad = graph.x_dict['activity'].grad[step]
-                        act_inp = graph.x_dict['activity'][step]
-                        contrib_sum += (act_grad * act_inp).abs().sum().item()
-                        act_idx = act_inp.argmax().item()
-                        info['activity'] = self._get_activity_name(act_idx)
-
-                    if 'resource' in graph.x_dict and graph.x_dict['resource'].grad is not None:
-                        res_grad = graph.x_dict['resource'].grad[step]
-                        res_inp = graph.x_dict['resource'][step]
-                        contrib_sum += (res_grad * res_inp).abs().sum().item()
-                        res_idx = res_inp.argmax().item()
-                        info['resource'] = self._get_resource_name(res_idx)
-
-                    if 'time' in graph.x_dict and graph.x_dict['time'].grad is not None:
-                        time_grad = graph.x_dict['time'].grad[step]
-                        time_inp = graph.x_dict['time'][step]
-                        contrib_sum += (time_grad * time_inp).abs().sum().item()
-                        info['timestamp'] = time_inp.item()
-
-                step_contributions.append(contrib_sum)
-                step_info.append(info)
-
-        return np.array(step_contributions), score.item(), true_val, step_info
-
-    def plot_individual_gradient_explanation(self, contributions, pred, true_val, step_info, output_dir, task, sample_id):
-        os.makedirs(output_dir, exist_ok=True)
-
-        if contributions is None:
-            return
-
-        num_steps = len(contributions)
-        timestamps = []
-        for info in step_info:
-            if 'timestamp' in info:
-                timestamps.append(info['timestamp'])
-            else:
-                timestamps.append(None)
-
-        fig, ax = plt.subplots(figsize=(18, 8))
-
-        centered_contrib = contributions - np.mean(contributions)
-
-        if task in ['event_time', 'remaining_time']:
-            x_labels = []
-            for i, info in enumerate(step_info):
-                if timestamps[i] is not None:
-                    timestamp = timestamps[i]
-                    if timestamp < 1:
-                        x_labels.append(f"{timestamp*24:.1f}h")
-                    else:
-                        x_labels.append(f"Day {timestamp:.1f}")
-                else:
-                    x_labels.append(f"Step {info['step']}")
-        else:
-            x_labels = []
-            for info in step_info:
-                activity = info.get('activity', f"Step_{info['step']}")
-                if len(activity) > 15:
-                    activity = activity[:13] + '..'
-                x_labels.append(activity)
-
-        time_steps = np.arange(num_steps)
-        positive = np.maximum(centered_contrib, 0)
-        negative = np.minimum(centered_contrib, 0)
-
-        ax.bar(time_steps, positive, color='#2ca02c', alpha=1.0,
-               label='Increases Prediction', width=0.75, edgecolor='black', linewidth=0.8)
-        ax.bar(time_steps, negative, color='#d62728', alpha=1.0,
-               label='Decreases Prediction', width=0.75, edgecolor='black', linewidth=0.8)
-        ax.axhline(y=0, color='black', linestyle='-', linewidth=2)
-
-        if task in ['event_time', 'remaining_time']:
-            max_contrib = np.max(np.abs(centered_contrib)) if len(centered_contrib) > 0 else 1
-            label_offset = max_contrib * 0.15
-
-            for i in range(num_steps):
-                info = step_info[i]
-                activity = info.get('activity', 'N/A')
-                if len(activity) > 12:
-                    activity = activity[:10] + '..'
-
-                contrib_val = centered_contrib[i]
-                if contrib_val > 0:
-                    y_pos = contrib_val + label_offset
-                    va = 'bottom'
-                else:
-                    y_pos = contrib_val - label_offset
-                    va = 'top'
-
-                bbox_props = dict(boxstyle='round,pad=0.35', facecolor='lightyellow',
-                                  edgecolor='gray', linewidth=0.6, alpha=0.85)
-
-                ax.text(time_steps[i], y_pos, activity,
-                        ha='center', va=va, fontsize=8,
-                        bbox=bbox_props, rotation=0)
-
-        if task in ['event_time', 'remaining_time']:
-            xlabel = 'Event (Timestamp)'
-        else:
-            xlabel = 'Event (Activity + Timestamp)'
-
-        ax.set_xlabel(xlabel, fontweight='bold', fontsize=14)
-        ax.set_ylabel('Gradient Value (Contribution)', fontweight='bold', fontsize=14)
-
-        ax.set_title(f'Timestep-Level Gradient Attribution - Sample {sample_id}',
-                     fontweight='bold', fontsize=16, pad=20)
-
-        ax.legend(loc='upper right', framealpha=0.95, fontsize=12)
-        ax.grid(True, alpha=0.3, axis='y', linestyle='--', linewidth=0.8)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-
-        ax.set_xticks(time_steps)
-        ax.set_xticklabels(x_labels, fontsize=9, rotation=45, ha='right')
-
-        max_contrib = np.max(np.abs(centered_contrib)) if len(centered_contrib) > 0 else 1
-        y_margin = max_contrib * 0.45
-        ax.set_ylim(negative.min() - y_margin if len(negative) > 0 else -1,
-                    positive.max() + y_margin if len(positive) > 0 else 1)
-
-        plt.tight_layout()
-
-        output_path = os.path.join(output_dir, f'gradient_timestep_heatmap_sample_{sample_id}.png')
-        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
-        plt.close()
-
-        print(f"[OK] Gradient plot saved: gradient_timestep_heatmap_sample_{sample_id}.png")
-
-        if step_info:
-            df_info = pd.DataFrame(step_info)
-            df_info['gradient_value'] = centered_contrib
-
-            if task in ['event_time', 'remaining_time']:
-                cols = ['step']
-                if 'timestamp' in df_info.columns:
-                    cols.append('timestamp')
-                if 'activity' in df_info.columns:
-                    cols.append('activity')
-                cols.append('gradient_value')
-                df_info = df_info[cols]
-
-                csv_path = os.path.join(output_dir, f'gradient_timestep_sample_{sample_id}_details.csv')
-                with open(csv_path, 'w') as f:
-                    f.write(f"# Task: {task}\n")
-                    f.write("# Gradient values from: TIMESTAMP FEATURES ONLY\n")
-                    f.write("# Activity shown for context only\n")
-                    df_info.to_csv(f, index=False)
-            else:
-                df_info.to_csv(
-                    os.path.join(output_dir, f'gradient_timestep_sample_{sample_id}_details.csv'),
-                    index=False
-                )
-
-    def generate_temporal_plots(self, graphs, output_dir, task='activity', num_samples=10, y_true=None):
-        os.makedirs(output_dir, exist_ok=True)
-
-        if not graphs:
-            print("[WARNING] Temporal gradient plot skipped: no graphs available.")
-            return
-
-        sample_count = min(num_samples, len(graphs))
-        sample_indices = np.random.choice(len(graphs), sample_count, replace=False)
-        print(f"Generating temporal gradient plots for {len(sample_indices)} samples ({task})...")
-
-        created = 0
-        for i, idx in enumerate(sample_indices):
-            graph = graphs[idx]
-            try:
-                contrib, pred, true_val, step_info = self.explain_individual_sample(graph, task)
-                if contrib is None:
-                    print(f"[WARNING] Sample {idx} skipped (no contribution).")
-                    continue
-                self.plot_individual_gradient_explanation(contrib, pred, true_val, step_info, output_dir, task, i)
-                created += 1
-            except Exception as e:
-                print(f"[WARNING] Temporal plot failed for sample {idx}: {e}")
-
-        if created == 0:
-            print(f"[WARNING] No temporal plots generated for {task}.")
-
-
-class GraphLIMEExplainer:
-    def __init__(self, model, device, vocabularies=None, top_k=10, hsic_lambda=0.01):
-        self.model = model
-        self.device = device
-        self.top_k = top_k
-        self.hsic_lambda = hsic_lambda
-        
-        if callable(vocabularies):
-            try:
-                self.vocabs = vocabularies()
-            except:
-                self.vocabs = {}
-        else:
-            self.vocabs = vocabularies or {}
-        if not isinstance(self.vocabs, dict):
-            self.vocabs = {}
-
-    def _get_activity_name(self, idx):
-        if 'Activity' in self.vocabs:
-            inv_vocab = {v: k for k, v in self.vocabs['Activity'].items()}
-            return inv_vocab.get(int(idx), f"Activity_{idx}")
-        return f"Activity_{idx}"
-
-    def _get_resource_name(self, idx):
-        if 'Resource' in self.vocabs:
-            inv_vocab = {v: k for k, v in self.vocabs['Resource'].items()}
-            return inv_vocab.get(int(idx), f"Resource_{idx}")
-        return f"Resource_{idx}"
-        
-    def _get_feature_name(self, node_type, feature_idx):
-        if node_type == 'activity' and 'Activity' in self.vocabs:
-            vocab = self.vocabs['Activity']
-            inv_vocab = {v: k for k, v in vocab.items()}
-            return inv_vocab.get(int(feature_idx), f"Activity_{feature_idx}")
-        elif node_type == 'resource' and 'Resource' in self.vocabs:
-            vocab = self.vocabs['Resource']
-            inv_vocab = {v: k for k, v in vocab.items()}
-            return inv_vocab.get(int(feature_idx), f"Resource_{feature_idx}")
-        return f"{node_type}_{feature_idx}"
-
-    def _aggregate_features(self, explanation):
-        activity_stats = {}
-        for item in explanation:
-            name = item['Feature']
-            weight = item['Weight']
-            
-            if name not in activity_stats:
-                activity_stats[name] = {'weight': 0.0, 'count': 0}
-            activity_stats[name]['weight'] += weight
-            activity_stats[name]['count'] += 1
-        
-        aggregated = []
-        for name, stats in activity_stats.items():
-            label = f"{name} (x{stats['count']})" if stats['count'] > 1 else name
-            aggregated.append({
-                'Feature': label,
-                'Weight': stats['weight'],
-                'AbsWeight': abs(stats['weight'])
-            })
-        
-        return sorted(aggregated, key=lambda x: x['AbsWeight'], reverse=False)
-
-    def _median_sigma(self, distances):
-        flat = distances.ravel()
-        non_zero = flat[flat > 0]
-        if non_zero.size == 0:
-            return 1.0
-        return float(np.median(non_zero))
-
-    def _center_and_normalize(self, k_mat):
-        n = k_mat.shape[0]
-        h = np.eye(n) - np.ones((n, n)) / n
-        centered = h @ k_mat @ h
-        norm = np.linalg.norm(centered, ord="fro")
-        if norm > 0:
-            return centered / norm
-        return centered
-
-    def _hsic_lasso(self, x_mat, y_vec):
-        n, d = x_mat.shape
-        if n < 2 or d == 0:
-            return None
-
-        y = y_vec.reshape(-1, 1)
-        y_dist = y - y.T
-        sigma_y = self._median_sigma(np.abs(y_dist))
-        l_mat = np.exp(-(y_dist ** 2) / (2 * sigma_y ** 2))
-        l_bar = self._center_and_normalize(l_mat)
-
-        features = []
-        for k in range(d):
-            xk = x_mat[:, k].reshape(-1, 1)
-            x_dist = xk - xk.T
-            sigma_x = self._median_sigma(np.abs(x_dist))
-            k_mat = np.exp(-(x_dist ** 2) / (2 * sigma_x ** 2))
-            k_bar = self._center_and_normalize(k_mat)
-            features.append(k_bar.reshape(-1))
-
-        x_feat = np.stack(features, axis=1)
-        y_target = l_bar.reshape(-1)
-
-        model = Lasso(alpha=self.hsic_lambda, fit_intercept=False, positive=False, max_iter=5000)
-        model.fit(x_feat, y_target)
-        return model.coef_
-
-    def _binary_mask_effects(self, x_mat, y_vec):
-        weights = []
-        y = np.asarray(y_vec, dtype=float)
-        for k in range(x_mat.shape[1]):
-            on_mask = x_mat[:, k] > 0.5
-            off_mask = ~on_mask
-            if on_mask.sum() == 0 or off_mask.sum() == 0:
-                weights.append(0.0)
-                continue
-            on_mean = float(np.mean(y[on_mask]))
-            off_mean = float(np.mean(y[off_mask]))
-            weights.append(on_mean - off_mean)
-        return np.asarray(weights, dtype=float)
-
-    def explain_local(self, graph, task='activity', num_perturbations=200):
-        self.model.eval()
-        graph = graph.to(self.device)
-
-        predicted_class = None
-        true_val = None
-        with torch.no_grad():
-            out = self.model(graph)
-            if task == 'event_time':
-                base_score = out[1].item()
-                true_val = graph.y_timestamp.item()
-            elif task == 'remaining_time':
-                base_score = out[2].item()
-                true_val = graph.y_remaining_time.item()
-            else:
-                logits = out[0].view(-1)
-                probs = torch.softmax(logits, dim=0)
-                predicted_class = int(torch.argmax(probs).item())
-                base_score = float(probs[predicted_class].item())
-                true_val = float(graph.y_activity.view(-1)[0].item())
-
-        activity_features = graph['activity'].x.shape[1] if 'activity' in graph.x_dict else 0
-        resource_features = graph['resource'].x.shape[1] if 'resource' in graph.x_dict else 0
-
-        active_activity = (
-            torch.where(graph['activity'].x.sum(dim=0) > 0)[0].cpu().numpy()
-            if activity_features > 0 else np.array([])
+    def forward(self, x_dict, edge_index_dict, batch_dict=None):
+        act, event_time, remaining_time = self.base_model(
+            x_dict,
+            edge_index_dict=edge_index_dict,
+            batch_dict=batch_dict,
         )
-        active_resource = (
-            torch.where(graph['resource'].x.sum(dim=0) > 0)[0].cpu().numpy()
-            if resource_features > 0 else np.array([])
-        )
-
-        active_features = [("activity", idx) for idx in active_activity] + [
-            ("resource", idx) for idx in active_resource
-        ]
-        if not active_features:
-            return [], base_score, true_val, [], predicted_class
-
-        X_perturb = []
-        y_perturb = []
-
-        for _ in range(num_perturbations):
-            mask_activity = np.ones(activity_features, dtype=np.float32)
-            mask_resource = np.ones(resource_features, dtype=np.float32)
-
-            if len(active_activity) > 0:
-                subset = np.random.choice(
-                    active_activity, size=int(max(1, len(active_activity) * 0.3)), replace=False
-                )
-                mask_activity[subset] = 0.0
-
-            if len(active_resource) > 0:
-                subset = np.random.choice(
-                    active_resource, size=int(max(1, len(active_resource) * 0.3)), replace=False
-                )
-                mask_resource[subset] = 0.0
-
-            mask_activity_active = (
-                mask_activity[active_activity] if len(active_activity) > 0 else np.array([])
-            )
-            mask_resource_active = (
-                mask_resource[active_resource] if len(active_resource) > 0 else np.array([])
-            )
-            combined_mask = np.concatenate([mask_activity_active, mask_resource_active])
-            X_perturb.append(combined_mask)
-
-            masked_graph = graph.clone()
-            if activity_features > 0:
-                act_mask_tensor = torch.tensor(
-                    mask_activity, device=self.device, dtype=torch.float32
-                ).view(1, -1)
-                masked_graph['activity'].x = masked_graph['activity'].x * act_mask_tensor
-            if resource_features > 0 and 'resource' in masked_graph.x_dict:
-                res_mask_tensor = torch.tensor(
-                    mask_resource, device=self.device, dtype=torch.float32
-                ).view(1, -1)
-                masked_graph['resource'].x = masked_graph['resource'].x * res_mask_tensor
-
-            with torch.no_grad():
-                out_p = self.model(masked_graph)
-                if task == 'event_time':
-                    score = out_p[1].item()
-                elif task == 'remaining_time':
-                    score = out_p[2].item()
-                else:
-                    probs = torch.softmax(out_p[0].view(-1), dim=0)
-                    cls = predicted_class if predicted_class is not None else int(torch.argmax(probs).item())
-                    score = float(probs[cls].item())
-                y_perturb.append(score)
-
-        X_perturb = np.array(X_perturb)
-        y_perturb = np.array(y_perturb)
-
-        coefs = self._hsic_lasso(X_perturb, y_perturb)
-        if coefs is None or np.allclose(coefs, 0):
-            weights = []
-            y_std = np.std(y_perturb)
-            for k in range(X_perturb.shape[1]):
-                x_std = np.std(X_perturb[:, k])
-                if x_std == 0 or y_std == 0:
-                    weights.append(0.0)
-                else:
-                    corr = np.corrcoef(X_perturb[:, k], y_perturb)[0, 1]
-                    weights.append(float(np.nan_to_num(corr, nan=0.0)))
-            coefs = np.array(weights)
-        if coefs is None or np.allclose(coefs, 0):
-            coefs = self._binary_mask_effects(X_perturb, y_perturb)
-
-        explanation = []
-        for coef, (node_type, feat_idx) in zip(coefs, active_features):
-            explanation.append({
-                'Feature': self._get_feature_name(node_type, feat_idx),
-                'Weight': float(coef),
-                'AbsWeight': float(abs(coef))
-            })
-
-        aggregated_explanation = self._aggregate_features(explanation)
-        if self.top_k and len(aggregated_explanation) > self.top_k:
-            aggregated_explanation = sorted(
-                aggregated_explanation, key=lambda x: x['AbsWeight'], reverse=True
-            )[: self.top_k]
-            aggregated_explanation = sorted(
-                aggregated_explanation, key=lambda x: x['AbsWeight'], reverse=False
-            )
-
-        step_info = [{"feature": row["Feature"]} for row in aggregated_explanation]
-        return aggregated_explanation, base_score, true_val, step_info, predicted_class
-
-    def plot_local(self, explanation, base_score, output_dir, task, sample_id, true_val=None, predicted_class=None):
-        os.makedirs(output_dir, exist_ok=True)
-
-        if not explanation:
-            return
-
-        df = pd.DataFrame(explanation)
-        if "AbsWeight" not in df.columns:
-            df["AbsWeight"] = df["Weight"].abs()
-        df = df.sort_values("AbsWeight", ascending=True)
-
-        fig, ax = plt.subplots(figsize=(10, max(6, len(df) * 0.45)))
-        # Match the original LIME palette used by the transformer explainability views.
-        colors = ['#2ca02c' if x > 0 else '#d62728' for x in df["Weight"]]
-        y_pos = np.arange(len(df))
-        ax.barh(y_pos, df["Weight"].values, color=colors, alpha=1.0, edgecolor='black', linewidth=0.8)
-
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(df["Feature"].tolist(), fontsize=9)
-        ax.set_xlabel('Feature Contribution (GraphLIME)', fontweight='bold', fontsize=12)
-
-        task_name = task.replace('_', ' ').title()
-        if task == 'activity':
-            pred_activity = self._get_activity_name(int(predicted_class)) if predicted_class is not None else "Unknown"
-            if true_val is not None:
-                true_activity = self._get_activity_name(int(true_val))
-                subtitle = f"Prediction: {pred_activity} ({base_score*100:.1f}%), True: {true_activity}"
-            else:
-                subtitle = f"Prediction: {pred_activity} ({base_score*100:.1f}%)"
-        else:
-            subtitle = f"Prediction: {base_score:.3f}" + (f", True: {true_val:.3f}" if true_val is not None else "")
-
-        ax.set_title(
-            f'Graph Neural Network (GNN) - GraphLIME\n{task_name} (Sample {sample_id})\n{subtitle}',
-            fontweight='bold',
-            fontsize=13,
-            pad=15
-        )
-
-        ax.axvline(x=0, color='black', linestyle='-', linewidth=1.5)
-        ax.grid(True, alpha=0.3, axis='x', linestyle='--')
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-
-        plt.tight_layout()
-
-        output_path = os.path.join(output_dir, f'graphlime_sample_{sample_id}_{task}.png')
-        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
-        plt.close()
-
-        csv_path = os.path.join(output_dir, f'graphlime_sample_{sample_id}_{task}.csv')
-        df.to_csv(csv_path, index=False)
-
-    def plot_local_explanation(self, explanation, base_score, true_val, step_info, output_dir, task, sample_id, predicted_class):
-        # step_info is kept for API compatibility with existing caller.
-        self.plot_local(
-            explanation=explanation,
-            base_score=base_score,
-            output_dir=output_dir,
-            task=task,
-            sample_id=sample_id,
-            true_val=true_val,
-            predicted_class=predicted_class,
-        )
+        if self.task == "activity":
+            return act
+        if self.task == "event_time":
+            return event_time
+        if self.task == "remaining_time":
+            return remaining_time
+        raise ValueError(f"Unsupported task for explanation: {self.task}")
 
 
-class ExplainabilityBenchmark:
+@dataclass
+class LocalExplanationArtifacts:
+    node_rows: list
+    edge_rows: list
+    prediction_summary: dict
+
+
+class ProphetGNNExplainer:
     """
-    Benchmark metrics for evaluating and comparing GNN explainability methods.
-    Mirrors transformer benchmark logic, adapted for graph inputs.
+    PROPHET-style explanation wrapper.
+
+    Local explanations come from GNNExplainer node/edge masks.
+    Global explanations aggregate node-type scores across explained graphs.
     """
-    def __init__(self, model, device, task='activity', vocabs=None):
+
+    def __init__(self, model, device, task="activity", vocabularies=None, epochs=200, preferred_time_unit=None):
+        if Explainer is None or GNNExplainer is None:
+            raise ImportError(
+                "torch_geometric.explain is required for PROPHET-style GNN explainability. "
+                f"Import failed: {_PYG_EXPLAIN_IMPORT_ERROR}"
+            )
         self.model = model
         self.device = device
         self.task = task
-        self.vocabs = vocabs or {}
-        self.results = {}
+        self.vocabularies = vocabularies or {}
+        self.epochs = epochs
+        self.preferred_time_unit = preferred_time_unit or ("seconds", 1.0, "s")
 
-    def _predict(self, graph):
-        self.model.eval()
-        graph = graph.to(self.device)
-        with torch.no_grad():
-            return self.model(graph)
+        self._activity_vocab = _inverse_vocab(self.vocabularies.get("Activity"))
+        self._resource_vocab = _inverse_vocab(self.vocabularies.get("Resource"))
+        self._explainer = Explainer(
+            model=_TaskHeadModel(self.model, task),
+            algorithm=GNNExplainer(epochs=epochs),
+            explanation_type="model",
+            node_mask_type="attributes",
+            edge_mask_type="object",
+            model_config=self._model_config(task),
+        )
 
-    def _select_output(self, out):
-        if self.task == 'activity':
-            logits = out[0]
-            if logits.ndim == 1:
-                logits = logits.unsqueeze(0)
-            return torch.softmax(logits, dim=-1)
-        if self.task == 'event_time':
-            return out[1]
-        return out[2]
-
-    def _prediction_value(self, out):
-        pred = self._select_output(out)
-        if self.task == 'activity':
-            return pred.max()
-        return pred.mean()
-
-    def _target_index(self, prediction):
-        if self.task != 'activity':
-            return None
-        flat = prediction.view(-1)
-        return int(torch.argmax(flat).item())
-
-    def _target_score(self, prediction, target_idx=None):
-        if self.task == 'activity':
-            flat = prediction.view(-1)
-            if target_idx is None:
-                target_idx = int(torch.argmax(flat).item())
-            return flat[target_idx]
-        return prediction.mean()
-
-    def _prediction_change(self, original_pred, updated_pred, target_idx=None):
-        if self.task == 'activity':
-            return (self._target_score(original_pred, target_idx) - self._target_score(updated_pred, target_idx)).item()
-        return (original_pred - updated_pred).abs().mean().item()
-
-    def _attribution_similarity(self, baseline_attr, perturbed_attr):
-        baseline = np.asarray(baseline_attr, dtype=float)
-        perturbed = np.asarray(perturbed_attr, dtype=float)
-        denom = np.linalg.norm(baseline) * np.linalg.norm(perturbed)
-        if denom == 0:
-            return 1.0 if np.linalg.norm(baseline - perturbed) == 0 else 0.0
-        return float(np.dot(baseline, perturbed) / denom)
-
-    def _feature_dims(self, graph):
-        act_features = graph['activity'].x.shape[1] if 'activity' in graph.x_dict else 0
-        res_features = graph['resource'].x.shape[1] if 'resource' in graph.x_dict else 0
-        return act_features, res_features
-
-    def _mask_graph(self, graph, act_mask=None, res_mask=None):
-        masked = graph.clone()
-        if act_mask is not None and 'activity' in masked.x_dict:
-            mask_tensor = torch.tensor(act_mask, device=masked['activity'].x.device, dtype=masked['activity'].x.dtype)
-            masked['activity'].x = masked['activity'].x * mask_tensor
-        if res_mask is not None and 'resource' in masked.x_dict:
-            mask_tensor = torch.tensor(res_mask, device=masked['resource'].x.device, dtype=masked['resource'].x.dtype)
-            masked['resource'].x = masked['resource'].x * mask_tensor
-        return masked
-
-    def _masks_from_indices(self, indices, act_features, res_features, keep=False):
-        if keep:
-            act_mask = np.zeros(act_features, dtype=np.float32)
-            res_mask = np.zeros(res_features, dtype=np.float32)
-        else:
-            act_mask = np.ones(act_features, dtype=np.float32)
-            res_mask = np.ones(res_features, dtype=np.float32)
-
-        for idx in indices:
-            if idx < act_features:
-                act_mask[idx] = 1.0 if keep else 0.0
-            else:
-                res_idx = idx - act_features
-                if 0 <= res_idx < res_features:
-                    res_mask[res_idx] = 1.0 if keep else 0.0
-        return act_mask, res_mask
-
-    def compute_gradient_attributions(self, graphs):
-        self.model.eval()
-        attributions = []
-        node_contribs = []
-
-        for graph in graphs:
-            g = graph.to(self.device)
-            for key in g.x_dict:
-                g.x_dict[key] = g.x_dict[key].detach().clone().requires_grad_(True)
-
-            out = self.model(g)
-            if self.task == 'activity':
-                logits = out[0]
-                pred_idx = logits.argmax(dim=1)
-                score = logits[0, pred_idx]
-            elif self.task == 'event_time':
-                score = out[1].sum()
-            else:
-                score = out[2].sum()
-
-            self.model.zero_grad()
-            score.backward()
-
-            act_features = g['activity'].x.shape[1] if 'activity' in g.x_dict else 0
-            res_features = g['resource'].x.shape[1] if 'resource' in g.x_dict else 0
-            combined = np.zeros(act_features + res_features, dtype=np.float32)
-
-            if 'activity' in g.x_dict and g.x_dict['activity'].grad is not None:
-                grad = g.x_dict['activity'].grad
-                inp = g.x_dict['activity']
-                act_attr = (grad * inp).abs().sum(dim=0).detach().cpu().numpy()
-                combined[:act_features] = act_attr
-                node_contrib = (grad * inp).abs().sum(dim=1).detach().cpu().numpy()
-                node_contribs.append(node_contrib)
-            else:
-                node_contribs.append(np.array([]))
-
-            if 'resource' in g.x_dict and g.x_dict['resource'].grad is not None:
-                grad = g.x_dict['resource'].grad
-                inp = g.x_dict['resource']
-                res_attr = (grad * inp).abs().sum(dim=0).detach().cpu().numpy()
-                combined[act_features:] = res_attr
-
-            attributions.append(combined)
-
-        if attributions:
-            return np.stack(attributions, axis=0), node_contribs
-        return np.array([]), []
-
-    def _parse_feature_name(self, name, act_vocab, res_vocab):
-        clean = re.sub(r'\s+\(x\d+\)$', '', name).strip()
-        if clean in act_vocab:
-            return 'activity', act_vocab[clean]
-        if clean in res_vocab:
-            return 'resource', res_vocab[clean]
-        if clean.startswith('Activity_'):
-            try:
-                return 'activity', int(clean.split('_', 1)[1])
-            except ValueError:
-                return None, None
-        if clean.startswith('Resource_'):
-            try:
-                return 'resource', int(clean.split('_', 1)[1])
-            except ValueError:
-                return None, None
-        return None, None
-
-    def vectorize_graphlime(self, explanation, act_features, res_features):
-        vec = np.zeros(act_features + res_features, dtype=np.float32)
-        act_vocab = self.vocabs.get('Activity', {})
-        res_vocab = self.vocabs.get('Resource', {})
-
-        for item in explanation:
-            name = item.get('Feature')
-            if not name:
-                continue
-            node_type, idx = self._parse_feature_name(name, act_vocab, res_vocab)
-            if node_type == 'activity' and 0 <= idx < act_features:
-                vec[idx] = float(item.get('Weight', 0.0))
-            elif node_type == 'resource' and 0 <= idx < res_features:
-                vec[act_features + idx] = float(item.get('Weight', 0.0))
-        return vec
-
-    def faithfulness_correlation(self, graphs, attributions, k_values=[1, 3, 5, 10]):
-        print("Computing Faithfulness Correlation...")
-        n_samples = len(graphs)
-        n_features = attributions.shape[1] if attributions.ndim > 1 else len(attributions)
-
-        results = {}
-        for k in k_values:
-            if k > n_features:
-                continue
-
-            pred_changes = []
-            importance_sums = []
-
-            for i in range(n_samples):
-                orig_out = self._predict(graphs[i])
-                orig_pred = self._select_output(orig_out)
-                target_idx = self._target_index(orig_pred)
-
-                sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = np.argsort(sample_attr)[-k:]
-
-                act_features, res_features = self._feature_dims(graphs[i])
-                act_mask, res_mask = self._masks_from_indices(top_k_idx, act_features, res_features, keep=False)
-                masked_graph = self._mask_graph(graphs[i], act_mask, res_mask)
-                masked_out = self._predict(masked_graph)
-                masked_pred = self._select_output(masked_out)
-
-                pred_change = self._prediction_change(orig_pred, masked_pred, target_idx)
-
-                pred_changes.append(pred_change)
-                importance_sums.append(sample_attr[top_k_idx].sum())
-
-            from scipy.stats import spearmanr, pearsonr
-            if len(set(pred_changes)) > 1 and len(set(importance_sums)) > 1:
-                spearman_corr, spearman_p = spearmanr(importance_sums, pred_changes)
-                pearson_corr, pearson_p = pearsonr(importance_sums, pred_changes)
-            else:
-                spearman_corr, spearman_p = 0.0, 1.0
-                pearson_corr, pearson_p = 0.0, 1.0
-
-            results[f'faithfulness_k{k}'] = {
-                'spearman_correlation': float(spearman_corr),
-                'spearman_p_value': float(spearman_p),
-                'pearson_correlation': float(pearson_corr),
-                'pearson_p_value': float(pearson_p),
-                'mean_pred_change': float(np.mean(pred_changes)),
-                'std_pred_change': float(np.std(pred_changes))
+    @staticmethod
+    def _model_config(task):
+        if task == "activity":
+            return {
+                "mode": "multiclass_classification",
+                "task_level": "graph",
+                "return_type": "raw",
             }
-
-        return results
-
-    def comprehensiveness(self, graphs, attributions, k_values=[1, 3, 5, 10]):
-        print("Computing Comprehensiveness...")
-        n_samples = len(graphs)
-        n_features = attributions.shape[1] if attributions.ndim > 1 else len(attributions)
-
-        results = {}
-        for k in k_values:
-            if k > n_features:
-                continue
-
-            comp_scores = []
-
-            for i in range(n_samples):
-                orig_out = self._predict(graphs[i])
-                orig_pred = self._select_output(orig_out)
-                target_idx = self._target_index(orig_pred)
-
-                sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = np.argsort(sample_attr)[-k:]
-
-                act_features, res_features = self._feature_dims(graphs[i])
-                act_mask, res_mask = self._masks_from_indices(top_k_idx, act_features, res_features, keep=False)
-                masked_graph = self._mask_graph(graphs[i], act_mask, res_mask)
-                masked_out = self._predict(masked_graph)
-                masked_pred = self._select_output(masked_out)
-
-                comp = self._prediction_change(orig_pred, masked_pred, target_idx)
-                comp_scores.append(comp)
-
-            results[f'comprehensiveness_k{k}'] = {
-                'mean': float(np.mean(comp_scores)),
-                'std': float(np.std(comp_scores)),
-                'median': float(np.median(comp_scores))
-            }
-
-        return results
-
-    def sufficiency(self, graphs, attributions, k_values=[1, 3, 5, 10]):
-        print("Computing Sufficiency...")
-        n_samples = len(graphs)
-        n_features = attributions.shape[1] if attributions.ndim > 1 else len(attributions)
-
-        results = {}
-        for k in k_values:
-            if k > n_features:
-                continue
-
-            suff_scores = []
-
-            for i in range(n_samples):
-                orig_out = self._predict(graphs[i])
-                orig_pred = self._select_output(orig_out)
-                target_idx = self._target_index(orig_pred)
-
-                sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = np.argsort(sample_attr)[-k:]
-
-                act_features, res_features = self._feature_dims(graphs[i])
-                act_mask, res_mask = self._masks_from_indices(top_k_idx, act_features, res_features, keep=True)
-                masked_graph = self._mask_graph(graphs[i], act_mask, res_mask)
-                masked_out = self._predict(masked_graph)
-                masked_pred = self._select_output(masked_out)
-
-                suff = self._prediction_change(orig_pred, masked_pred, target_idx)
-                suff_scores.append(suff)
-
-            results[f'sufficiency_k{k}'] = {
-                'mean': float(np.mean(suff_scores)),
-                'std': float(np.std(suff_scores)),
-                'median': float(np.median(suff_scores))
-            }
-
-        return results
-
-    def _perturb_graph(self, graph, mask_prob=0.05):
-        perturbed = graph.clone().to(self.device)
-        for key in perturbed.x_dict:
-            x = perturbed[key].x.clone()
-            if x.numel() == 0:
-                continue
-            active_mask = x != 0
-            drop_mask = (torch.rand_like(x, dtype=torch.float32) < mask_prob) & active_mask
-            x = x.masked_fill(drop_mask, 0.0)
-            perturbed[key].x = x
-        return perturbed
-
-    def stability(self, graphs, attributions, n_perturbations=10):
-        print("Computing Stability...")
-        n_samples = min(len(graphs), len(attributions), 20)
-        variance_scores = []
-        cosine_scores = []
-
-        for i in range(n_samples):
-            original_attr = np.asarray(attributions[i], dtype=float)
-            perturbed_attrs = []
-
-            for _ in range(n_perturbations):
-                perturbed_graph = self._perturb_graph(graphs[i])
-                perturbed_attr_batch, _ = self.compute_gradient_attributions([perturbed_graph])
-                if perturbed_attr_batch.size == 0:
-                    continue
-                perturbed_attr = np.asarray(perturbed_attr_batch[0], dtype=float)
-                min_len = min(len(original_attr), len(perturbed_attr))
-                if min_len == 0:
-                    continue
-                baseline = original_attr[:min_len]
-                candidate = perturbed_attr[:min_len]
-                perturbed_attrs.append(candidate)
-                cosine_scores.append(self._attribution_similarity(baseline, candidate))
-
-            if perturbed_attrs:
-                stacked = np.stack(perturbed_attrs, axis=0)
-                variance_scores.append(float(np.var(stacked, axis=0).mean()))
-
-        mean_variance = float(np.mean(variance_scores)) if variance_scores else 0.0
-        max_variance = float(np.max(variance_scores)) if variance_scores else 0.0
-        mean_cosine = float(np.mean(cosine_scores)) if cosine_scores else 0.0
-
         return {
-            'stability': {
-                'mean_variance': mean_variance,
-                'max_variance': max_variance,
-                'mean_cosine_similarity': mean_cosine,
-                'stability_score': mean_cosine
-            }
+            "mode": "regression",
+            "task_level": "graph",
+            "return_type": "raw",
         }
 
-    def method_agreement(self, grad_attributions, lime_attributions, k_values=[3, 5, 10]):
-        print("Computing Method Agreement (Gradient vs GraphLIME)...")
-        if grad_attributions is None or lime_attributions is None:
-            return {'method_agreement': 'N/A - Missing attributions'}
+    def _activity_name(self, row):
+        idx = int(np.argmax(row))
+        return self._activity_vocab.get(idx, f"activity_{idx}")
 
-        n_samples = min(len(grad_attributions), len(lime_attributions))
+    def _resource_name(self, row):
+        idx = int(np.argmax(row))
+        return self._resource_vocab.get(idx, f"resource_{idx}")
+
+    def _has_informative_resource_view(self):
+        labels = {
+            str(value).strip().lower()
+            for value in self._resource_vocab.values()
+            if str(value).strip()
+        }
+        placeholder_labels = {"unknown", "nan", "none", "null", "n/a", "na"}
+        return bool(labels) and not labels.issubset(placeholder_labels)
+
+    @staticmethod
+    def _decode_log_seconds(value):
+        return float(np.expm1(float(value)))
+
+    @staticmethod
+    def choose_preferred_time_unit(seconds_values):
+        values = [float(v) for v in seconds_values if np.isfinite(v) and float(v) >= 0]
+        if not values:
+            return ("seconds", 1.0, "s")
+        return ("compound", 1.0, "")
+
+    @staticmethod
+    def _format_compound_duration(seconds_value):
+        seconds = max(0.0, float(seconds_value))
+        total_seconds = int(round(seconds))
+        if total_seconds == 0:
+            return "0 s"
+
+        minute = 60
+        hour = 60 * minute
+        day = 24 * hour
+        month = 30 * day
+
+        if total_seconds >= month:
+            months, remainder = divmod(total_seconds, month)
+            days = remainder // day
+            return f"{months} mo {days} d" if days else f"{months} mo"
+        if total_seconds >= day:
+            days, remainder = divmod(total_seconds, day)
+            hours = remainder // hour
+            return f"{days} d {hours} h" if hours else f"{days} d"
+        if total_seconds >= hour:
+            hours, remainder = divmod(total_seconds, hour)
+            minutes = remainder // minute
+            return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+        if total_seconds >= minute:
+            minutes, remainder = divmod(total_seconds, minute)
+            return f"{minutes} min {remainder} s" if remainder else f"{minutes} min"
+        return f"{total_seconds} s"
+
+    def _format_duration(self, seconds_value, decimals=2):
+        unit_name, divisor, suffix = getattr(self, "preferred_time_unit", ("compound", 1.0, ""))
+        if unit_name == "compound":
+            return self._format_compound_duration(seconds_value)
+        scaled = float(seconds_value) / float(divisor)
+        return f"{scaled:.{decimals}f} {suffix}"
+
+    def _regression_question(self):
+        if self.task == "event_time":
+            return "Which graph components most influenced the predicted time until the next event?"
+        if self.task == "remaining_time":
+            return "Which graph components most influenced the predicted time until process completion?"
+        return "Which graph components most influenced the predicted time outcome?"
+
+    @staticmethod
+    def _graph_metadata_value(graph, name):
+        value = getattr(graph, name, None)
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return str(value.detach().cpu().view(-1)[0].item())
+            return None
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            return str(value[0])
+        return str(value)
+
+    @staticmethod
+    def _case_title_line(prediction):
+        case_id = prediction.get("case_id")
+        if case_id is None or str(case_id).strip() == "":
+            return None
+        return f"Case ID: {case_id}"
+
+    def _node_label(self, graph, node_type, node_idx):
+        x = graph[node_type].x[node_idx].detach().cpu().numpy()
+        if node_type == "activity":
+            return self._activity_name(x)
+        if node_type == "resource":
+            return self._resource_name(x)
+        if node_type == "time":
+            display_seconds = getattr(graph["time"], "display_seconds", None)
+            if display_seconds is not None and int(node_idx) < len(display_seconds):
+                seconds_value = float(display_seconds[node_idx].detach().cpu().item())
+                return f"t{node_idx + 1}: +{self._format_duration(seconds_value, decimals=1)}"
+            return f"time_{node_idx + 1}"
+        if node_type == "trace":
+            return "Case context"
+        return f"{node_type}_{node_idx}"
+
+    def _prediction_summary(self, graph):
+        self.model.eval()
+        with torch.no_grad():
+            act, event_time, remaining_time = self.model(graph)
+            graph_metadata = {
+                "case_id": self._graph_metadata_value(graph, "case_id"),
+                "prefix_id": self._graph_metadata_value(graph, "prefix_id"),
+            }
+            if self.task == "activity":
+                probs = torch.softmax(act, dim=-1)
+                pred_idx = int(probs.argmax(dim=-1).item())
+                true_idx = int(graph.y_activity.view(-1)[0].item())
+                return {
+                    **graph_metadata,
+                    "task": self.task,
+                    "predicted_index": pred_idx,
+                    "predicted_label": self._activity_vocab.get(pred_idx, str(pred_idx)),
+                    "true_index": true_idx,
+                    "true_label": self._activity_vocab.get(true_idx, str(true_idx)),
+                    "confidence": float(probs[0, pred_idx].item()),
+                }
+            if self.task == "event_time":
+                prediction_log_seconds = float(event_time.view(-1)[0].item())
+                target_log_seconds = float(graph.y_timestamp.view(-1)[0].item())
+                prediction_seconds = self._decode_log_seconds(prediction_log_seconds)
+                target_seconds = self._decode_log_seconds(target_log_seconds)
+                return {
+                    **graph_metadata,
+                    "task": self.task,
+                    "prediction_log_seconds": prediction_log_seconds,
+                    "target_log_seconds": target_log_seconds,
+                    "prediction_seconds": prediction_seconds,
+                    "target_seconds": target_seconds,
+                    "prediction_display": self._format_duration(prediction_seconds),
+                    "target_display": self._format_duration(target_seconds),
+                    "display_unit": self.preferred_time_unit[0],
+                    "display_suffix": self.preferred_time_unit[2],
+                    "explanation_question": self._regression_question(),
+                }
+            prediction_log_seconds = float(remaining_time.view(-1)[0].item())
+            target_log_seconds = float(graph.y_remaining_time.view(-1)[0].item())
+            prediction_seconds = self._decode_log_seconds(prediction_log_seconds)
+            target_seconds = self._decode_log_seconds(target_log_seconds)
+            return {
+                **graph_metadata,
+                "task": self.task,
+                "prediction_log_seconds": prediction_log_seconds,
+                "target_log_seconds": target_log_seconds,
+                "prediction_seconds": prediction_seconds,
+                "target_seconds": target_seconds,
+                "prediction_display": self._format_duration(prediction_seconds),
+                "target_display": self._format_duration(target_seconds),
+                "display_unit": self.preferred_time_unit[0],
+                "display_suffix": self.preferred_time_unit[2],
+                "explanation_question": self._regression_question(),
+            }
+
+    def _format_prediction_summary_lines(self, prediction):
+        if prediction["task"] == "activity":
+            return [
+                f"Task: next activity classification",
+                f"Predicted: {prediction['predicted_label']}",
+                f"True: {prediction['true_label']}",
+                f"Confidence: {prediction['confidence']:.3f}",
+            ]
+        question = prediction.get("explanation_question", self._regression_question())
+        return [
+            f"Task: {prediction['task'].replace('_', ' ')} regression",
+            question,
+            f"Predicted time: {prediction['prediction_display']}",
+            f"Actual time: {prediction['target_display']}",
+        ]
+
+    def _sample_description(self, artifacts, max_nodes=5, max_edges=5):
+        prediction = artifacts.prediction_summary
+        lines = self._format_prediction_summary_lines(prediction)
+
+        node_df = pd.DataFrame(artifacts.node_rows)
+        edge_df = pd.DataFrame(artifacts.edge_rows)
+
+        if not node_df.empty:
+            top_nodes = node_df.sort_values("score", ascending=False).head(max_nodes)
+            node_parts = [
+                f"{row.label} [{row.node_type}] ({row.score:.3f})"
+                for row in top_nodes.itertuples()
+            ]
+            lines.append("Most influential nodes: " + "; ".join(node_parts))
+
+        if not edge_df.empty:
+            top_edges = edge_df.sort_values("score", ascending=False).head(max_edges)
+            edge_parts = [
+                f"{row.source_label} -> {row.target_label} [{row.edge_type}] ({row.score:.3f})"
+                for row in top_edges.itertuples()
+            ]
+            lines.append("Most influential relations: " + "; ".join(edge_parts))
+
+        if prediction["task"] == "activity":
+            lines.append(
+                "Interpretation: the model predicts the next activity based primarily on the influential nodes and connections shown. For a human user, this means the highlighted sequence of events (nodes) and their relationships (edges) are the strongest indicators of what the system expects to happen next."
+            )
+        else:
+            if prediction["task"] == "event_time":
+                lines.append(
+                    "Interpretation: the model predicts the time until the next event based on these highlighted graph components. For a human user, this shows which past events and connections are most responsible for accelerating or delaying the upcoming step."
+                )
+            else:
+                lines.append(
+                    "Interpretation: the model predicts the time until process completion based on these highlighted graph components. For a human user, this shows which sequence of past events and relationships are driving the overall timeline of the process."
+                )
+
+        return lines
+
+    def _graphviz_activity_caption(self, edge_row):
+        relation = str(edge_row.relation)
+        if relation == "next":
+            return "follow"
+        if {edge_row.source_type, edge_row.target_type} == {"activity", "resource"}:
+            return "perform"
+        if {edge_row.source_type, edge_row.target_type} == {"activity", "time"}:
+            return "timing"
+        if "trace" in {edge_row.source_type, edge_row.target_type}:
+            return "context"
+        return "link"
+
+    def _short_activity_label(self, label, max_len=18):
+        text = str(label)
+        if len(text) <= max_len:
+            return text
+        words = [word for word in text.replace("_", " ").split() if word]
+        if len(words) >= 2:
+            initials = "".join(word[0].upper() for word in words[:4])
+            if len(initials) >= 2:
+                return initials
+        return text[: max_len - 1] + "…"
+
+    def _short_graphviz_label(self, label, node_type):
+        text = str(label).strip()
+        if node_type == "activity":
+            words = [word for word in text.replace("_", " ").split() if word.lower() not in {"by", "the", "of", "and"}]
+            if not words:
+                return "ACT"
+            initials = "".join(word[0].upper() for word in words[:4])
+            return initials if len(initials) >= 2 else self._short_activity_label(text, max_len=6)
+        if node_type == "resource":
+            upper = [word[0].upper() for word in text.replace("_", " ").split() if word]
+            return "".join(upper[:3]) or "RES"
+        if node_type == "time":
+            if ":" in text:
+                return text.split(":", 1)[0].upper()
+            return "T"
+        if node_type == "trace":
+            return "CTX"
+        return text[:4].upper() or "N"
+
+    def _graphviz_box_label(self, text, border_color, bold=False, font_color="#111827"):
+        safe = (
+            str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<BR/>")
+        )
+        tag_open = "<B>" if bold else ""
+        tag_close = "</B>" if bold else ""
+        return f'''<
+        <TABLE BORDER="1" COLOR="{border_color}" CELLBORDER="0" CELLSPACING="0" CELLPADDING="2" BGCOLOR="white">
+            <TR><TD><FONT POINT-SIZE="10" COLOR="{font_color}">{tag_open}{safe}{tag_close}</FONT></TD></TR>
+        </TABLE>
+        >'''
+
+    def _graphviz_escape(self, value):
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<BR/>")
+        )
+
+    def _graphviz_event_label(self, event_idx, activity_row, resource_row=None, time_row=None):
+        activity = self._graphviz_escape(activity_row.label)
+        activity_score = float(activity_row.score)
+        resource = self._graphviz_escape(resource_row.label) if resource_row is not None else "N/A"
+        resource_score = float(resource_row.score) if resource_row is not None else 0.0
+        timestamp = self._graphviz_escape(self._time_label_for_plot(time_row.label)) if time_row is not None else "N/A"
+        time_score = float(time_row.score) if time_row is not None else 0.0
+        return f'''<
+        <TABLE BORDER="1" COLOR="#cbd5e1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" BGCOLOR="white">
+            <TR>
+                <TD BGCOLOR="#f8fafc" COLSPAN="2">
+                    <FONT POINT-SIZE="14" COLOR="#475569"><B>E{event_idx + 1}</B></FONT>
+                </TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#fff1f2"><FONT POINT-SIZE="12" COLOR="#991b1b"><B>Activity</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{activity}</B><BR/>{activity_score:.2f}</FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#eff6ff"><FONT POINT-SIZE="12" COLOR="#1d4ed8"><B>Resource</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827">{resource}<BR/>{resource_score:.2f}</FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#ecfdf5"><FONT POINT-SIZE="12" COLOR="#047857"><B>Time</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827">{timestamp}<BR/>{time_score:.2f}</FONT></TD>
+            </TR>
+        </TABLE>
+        >'''
+
+    def _time_label_for_plot(self, label):
+        text = str(label)
+        match = re.match(r"^(t\d+): \+([0-9]+(?:\.[0-9]+)?) s$", text)
+        if not match:
+            return text
+        step, seconds_text = match.groups()
+        return f"{step}: +{self._format_duration(float(seconds_text), decimals=1)}"
+
+    def _graphviz_output_label(self, prediction):
+        if prediction.get("task") in {"event_time", "remaining_time"}:
+            task_label = (
+                "Event Time Prediction"
+                if prediction.get("task") == "event_time"
+                else "Remaining Time Prediction"
+            )
+            predicted_label = (
+                "Predicted event time"
+                if prediction.get("task") == "event_time"
+                else "Predicted remaining time"
+            )
+            actual_label = (
+                "Actual event time"
+                if prediction.get("task") == "event_time"
+                else "Actual remaining time"
+            )
+            predicted = self._graphviz_escape(prediction["prediction_display"])
+            actual = self._graphviz_escape(prediction["target_display"])
+            error_seconds = abs(float(prediction["prediction_seconds"]) - float(prediction["target_seconds"]))
+            error_display = self._graphviz_escape(self._format_duration(error_seconds))
+            return f'''<
+        <TABLE BORDER="1" COLOR="#64748b" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" BGCOLOR="white">
+            <TR>
+                <TD BGCOLOR="#f8fafc" COLSPAN="2">
+                    <FONT POINT-SIZE="14" COLOR="#475569"><B>Model Output</B></FONT>
+                </TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#f8fafc"><FONT POINT-SIZE="12" COLOR="#475569"><B>Task</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{task_label}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#dbeafe"><FONT POINT-SIZE="12" COLOR="#1d4ed8"><B>{predicted_label}</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{predicted}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#f8fafc"><FONT POINT-SIZE="12" COLOR="#475569"><B>{actual_label}</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{actual}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#fff7ed"><FONT POINT-SIZE="12" COLOR="#c2410c"><B>Absolute error</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827">{error_display}</FONT></TD>
+            </TR>
+        </TABLE>
+        >'''
+
+        predicted = self._graphviz_escape(prediction["predicted_label"])
+        true = self._graphviz_escape(prediction["true_label"])
+        confidence = float(prediction["confidence"])
+        return f'''<
+        <TABLE BORDER="1" COLOR="#64748b" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" BGCOLOR="white">
+            <TR>
+                <TD BGCOLOR="#f8fafc" COLSPAN="2">
+                    <FONT POINT-SIZE="14" COLOR="#475569"><B>Model Output</B></FONT>
+                </TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#dbeafe"><FONT POINT-SIZE="12" COLOR="#1d4ed8"><B>Predicted next</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{predicted}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#f8fafc"><FONT POINT-SIZE="12" COLOR="#475569"><B>Ground truth</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{true}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#eff6ff"><FONT POINT-SIZE="12" COLOR="#1d4ed8"><B>Confidence</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827">{confidence:.3f}</FONT></TD>
+            </TR>
+        </TABLE>
+        >'''
+
+    def _append_explanation_weight_footer(self, output_path, dpi=180):
+        note = "Numerical values represent post-hoc explanation weights for nodes and edges in the explanation graph."
+        image = plt.imread(output_path)
+        height, width = image.shape[:2]
+        fontsize = 26
+        padding_px = 80
+
+        measure_fig = plt.figure(figsize=(1, 1), dpi=dpi)
+        measure_text = measure_fig.text(0, 0, note, fontsize=fontsize)
+        measure_fig.canvas.draw()
+        text_bbox = measure_text.get_window_extent(renderer=measure_fig.canvas.get_renderer())
+        plt.close(measure_fig)
+
+        canvas_width = max(width, int(np.ceil(text_bbox.width + padding_px)))
+        footer_height = max(220, int(np.ceil(text_bbox.height + padding_px)))
+        total_height = height + footer_height
+
+        fig = plt.figure(figsize=(canvas_width / dpi, total_height / dpi), dpi=dpi, facecolor="white")
+        image_x = (canvas_width - width) / (2 * canvas_width)
+        image_ax = fig.add_axes([image_x, footer_height / total_height, width / canvas_width, height / total_height])
+        image_ax.imshow(image)
+        image_ax.set_axis_off()
+
+        footer_ax = fig.add_axes([0, 0, 1, footer_height / total_height])
+        footer_ax.set_axis_off()
+        footer_ax.text(
+            0.5,
+            0.5,
+            note,
+            ha="center",
+            va="center",
+            fontsize=fontsize,
+            color="#334155",
+            bbox={
+                "boxstyle": "round,pad=0.65",
+                "fc": "#f8fafc",
+                "ec": "#cbd5e1",
+                "alpha": 1.0,
+            },
+        )
+
+        fig.savefig(output_path, dpi=dpi, bbox_inches=None, pad_inches=0, facecolor="white")
+        plt.close(fig)
+
+    def _draw_local_dfg_graphviz(self, artifacts, output_path):
+        prediction = artifacts.prediction_summary
+        task = prediction.get("task")
+        if task not in {"activity", "event_time", "remaining_time"}:
+            return False
+
+        node_df = pd.DataFrame(artifacts.node_rows)
+        edge_df = pd.DataFrame(artifacts.edge_rows)
+        activity_df = node_df[node_df["node_type"] == "activity"].sort_values("node_index").reset_index(drop=True)
+        resource_df = node_df[node_df["node_type"] == "resource"].sort_values("node_index").reset_index(drop=True)
+        time_df = node_df[node_df["node_type"] == "time"].sort_values("node_index").reset_index(drop=True)
+        if activity_df.empty:
+            return False
+
+        dot = graphviz.Digraph(comment="Local DFG Trace Sequence")
+        dot.attr(
+            rankdir="LR",
+            splines="spline",
+            nodesep="0.45",
+            ranksep="0.7",
+            pad="0.2",
+            margin="0.05",
+            concentrate="false",
+            ordering="out",
+            dpi="180",
+        )
+        title_lines = ["Local Explanation - DFG Trace Sequence"]
+        case_title = self._case_title_line(prediction)
+        if case_title:
+            title_lines.append(case_title)
+        if task == "activity":
+            title_lines.append(
+                f"Predicted: {prediction['predicted_label']} | "
+                f"True: {prediction['true_label']} | "
+                f"Confidence: {prediction['confidence']:.3f}"
+            )
+        elif task == "event_time":
+            title_lines.append(
+                "Task: event time regression | "
+                f"Predicted event time: {prediction['prediction_display']} | "
+                f"Actual event time: {prediction['target_display']}"
+            )
+        else:
+            title_lines.append(
+                "Task: remaining time regression | "
+                f"Predicted remaining time: {prediction['prediction_display']} | "
+                f"Actual remaining time: {prediction['target_display']}"
+            )
+        dot.attr(
+            label="\n".join(title_lines),
+            labelloc="t",
+            fontsize="24",
+            fontname="Helvetica",
+            fontcolor="#0f172a",
+        )
+        dot.attr("node", shape="plain", fontname="Helvetica")
+        dot.attr("edge", fontname="Helvetica", fontsize="12", color="#0f172a", arrowsize="0.9")
+
+        event_count = int(activity_df["node_index"].max()) + 1
+        event_ids = []
+        for idx in range(event_count):
+            activity_rows = activity_df[activity_df["node_index"] == idx]
+            if activity_rows.empty:
+                continue
+            resource_rows = resource_df[resource_df["node_index"] == idx]
+            time_rows = time_df[time_df["node_index"] == idx]
+            node_id = f"event_{idx}"
+            event_ids.append(node_id)
+            dot.node(
+                node_id,
+                label=self._graphviz_event_label(
+                    idx,
+                    activity_rows.iloc[0],
+                    resource_rows.iloc[0] if not resource_rows.empty else None,
+                    time_rows.iloc[0] if not time_rows.empty else None,
+                ),
+            )
+
+        next_scores = {}
+        if not edge_df.empty:
+            next_edges = edge_df[edge_df["relation"] == "next"]
+            for row in next_edges.itertuples():
+                if row.source_type == "activity" and row.target_type == "activity":
+                    next_scores[(int(row.source_index), int(row.target_index))] = float(row.score)
+
+        for idx in range(event_count - 1):
+            src_id = f"event_{idx}"
+            dst_id = f"event_{idx + 1}"
+            if src_id not in event_ids or dst_id not in event_ids:
+                continue
+            score = next_scores.get((idx, idx + 1))
+            edge_label = "" if score is None else f"next {score:.2f}"
+            dot.edge(
+                src_id,
+                dst_id,
+                label=edge_label,
+                color="#0891b2",
+                penwidth="2.0",
+                weight="8",
+                constraint="true",
+            )
+
+        output_node = "model_output"
+        dot.node(output_node, label=self._graphviz_output_label(prediction))
+
+        last_event_id = f"event_{event_count - 1}"
+        if last_event_id in event_ids:
+            output_edge_label = ""
+            if task == "event_time":
+                output_edge_label = "predict event time"
+            elif task == "remaining_time":
+                output_edge_label = "predict remaining time"
+            dot.edge(
+                last_event_id,
+                output_node,
+                label=output_edge_label,
+                color="#1d4ed8",
+                style="dashed",
+                penwidth="2.0",
+                constraint="true",
+            )
+
+        base_path, _ = os.path.splitext(output_path)
+        dot.render(base_path, format="png", cleanup=True)
+        self._append_explanation_weight_footer(output_path)
+        return True
+
+    def _draw_local_graphviz_activity(self, artifacts, output_path):
+        prediction = artifacts.prediction_summary
+        if prediction.get("task") != "activity":
+            return
+
+        node_df = pd.DataFrame(artifacts.node_rows)
+        edge_df = pd.DataFrame(artifacts.edge_rows)
+        activity_df = node_df[node_df["node_type"] == "activity"].sort_values("node_index").reset_index(drop=True)
+        resource_df = node_df[node_df["node_type"] == "resource"].sort_values("node_index").reset_index(drop=True)
+        time_df = node_df[node_df["node_type"] == "time"].sort_values("node_index").reset_index(drop=True)
+        trace_df = node_df[node_df["node_type"] == "trace"].sort_values("node_index").reset_index(drop=True)
+        if activity_df.empty:
+            return
+
+        dot = graphviz.Digraph(comment="Local Activity Flow")
+        dot.attr(
+            rankdir="LR",
+            splines="ortho",
+            nodesep="0.45",
+            ranksep="0.9",
+            pad="0.15",
+            margin="0.05",
+            ratio="compress",
+            concentrate="false",
+        )
+        title_lines = ["Local Explanation"]
+        case_title = self._case_title_line(prediction)
+        if case_title:
+            title_lines.append(case_title)
+        title_lines.append(
+            f"Predicted: {prediction['predicted_label']} | "
+            f"True: {prediction['true_label']} | "
+            f"Confidence: {prediction['confidence']:.3f}"
+        )
+        dot.attr(
+            label="\n".join(title_lines),
+            labelloc="t",
+            fontsize="18",
+            fontname="Helvetica",
+        )
+        dot.attr("node", shape="circle", style="filled", fixedsize="true", width="0.26", height="0.26", label="")
+        dot.attr("edge", fontname="Helvetica", fontsize="10")
+
+        node_ids = {}
+        all_scores = node_df["score"].tolist() if not node_df.empty else [0.0]
+        max_score = max(float(max(all_scores)), 1e-6)
+
+        def add_node(node_type, row):
+            node_id = f"{node_type}_{int(row.node_index)}"
+            node_ids[(node_type, int(row.node_index))] = node_id
+            intensity = float(row.score) / max_score
+            if node_type == "activity":
+                fill = "#ef5350" if intensity >= 0.7 else "#f28b82" if intensity >= 0.35 else "#f8b4b4"
+            elif node_type == "resource":
+                fill = "#7986cb" if intensity >= 0.7 else "#9fa8da" if intensity >= 0.35 else "#c5cae9"
+            elif node_type == "time":
+                fill = "#4dd0e1" if intensity >= 0.7 else "#80deea" if intensity >= 0.35 else "#b2ebf2"
+            else:
+                fill = "#b39ddb" if intensity >= 0.7 else "#d1c4e9" if intensity >= 0.35 else "#ede7f6"
+            short = self._short_graphviz_label(row.label, node_type)
+            score_text = f"{short}: {row.score:.2f}"
+            dot.node(node_id, color=fill, fillcolor=fill, xlabel=score_text)
+
+        if not trace_df.empty:
+            trace_row = trace_df.iloc[0]
+            add_node("trace", trace_row)
+
+        event_count = int(max(activity_df["node_index"].max(), resource_df["node_index"].max() if not resource_df.empty else 0, time_df["node_index"].max() if not time_df.empty else 0)) + 1
+        for idx in range(event_count):
+            with dot.subgraph(name=f"cluster_evt_{idx}") as sg:
+                sg.attr(rank="same")
+                if idx < len(activity_df):
+                    add_node("activity", activity_df.iloc[idx])
+                    sg.node(node_ids[("activity", idx)])
+                if idx < len(resource_df):
+                    add_node("resource", resource_df.iloc[idx])
+                    sg.node(node_ids[("resource", idx)])
+                if idx < len(time_df):
+                    add_node("time", time_df.iloc[idx])
+                    sg.node(node_ids[("time", idx)])
+
+        for idx in range(event_count - 1):
+            for node_type in ("activity", "resource", "time"):
+                left_id = node_ids.get((node_type, idx))
+                right_id = node_ids.get((node_type, idx + 1))
+                if left_id and right_id:
+                    dot.edge(left_id, right_id, color="transparent", style="invis", weight="40")
+
+        relation_color = {
+            "follow": "#4dd0e1",
+            "perform": "#ef5350",
+            "timing": "#4dd0e1",
+            "context": "#9aa9bf",
+            "link": "#9aa9bf",
+        }
+
+        next_edges = edge_df[edge_df["relation"] == "next"].sort_values("score", ascending=False)
+        for row in next_edges.itertuples():
+            src_id = node_ids.get((row.source_type, int(row.source_index)))
+            dst_id = node_ids.get((row.target_type, int(row.target_index)))
+            if not src_id or not dst_id:
+                continue
+            caption = self._graphviz_activity_caption(row)
+            score = float(row.score)
+            dot.edge(
+                src_id,
+                dst_id,
+                label=self._graphviz_box_label(f"{caption}:{score:.2f}", relation_color[caption], bold=score >= 0.75),
+                color=relation_color[caption],
+                penwidth="1.5",
+                constraint="true",
+            )
+
+        candidate_edges = edge_df.sort_values("score", ascending=False)
+        added_keys = set()
+        added_count = 0
+        for row in candidate_edges.itertuples():
+            src_key = (row.source_type, int(row.source_index))
+            dst_key = (row.target_type, int(row.target_index))
+            src_id = node_ids.get(src_key)
+            dst_id = node_ids.get(dst_key)
+            if not src_id or not dst_id:
+                continue
+            key = (src_key, dst_key, row.relation)
+            if key in added_keys or row.relation == "next":
+                continue
+            added_keys.add(key)
+            caption = self._graphviz_activity_caption(row)
+            score = float(row.score)
+            dot.edge(
+                src_id,
+                dst_id,
+                label=self._graphviz_box_label(
+                    f"{caption}:{score:.2f}",
+                    relation_color.get(caption, "#9aa9bf"),
+                    bold=score >= 0.75,
+                    font_color="red" if caption == "perform" else "#111827",
+                ),
+                color=relation_color.get(caption, "#9aa9bf"),
+                penwidth="1.35",
+                constraint="false",
+            )
+            added_count += 1
+            if added_count >= 22:
+                break
+
+        dot.attr("node", shape="box", style="rounded,filled", fixedsize="false", width="0", height="0", label="")
+        pred_node = "predicted_output"
+        gt_node = "ground_truth_output"
+        dot.node(
+            pred_node,
+            label=f"Predicted next: {prediction['predicted_label']}",
+            fillcolor="#dbeafe",
+            color="#1d4ed8",
+            fontcolor="#0f172a",
+        )
+        dot.node(
+            gt_node,
+            label=f"Ground truth: {prediction['true_label']}",
+            fillcolor="#f8fafc",
+            color="#64748b",
+            fontcolor="#0f172a",
+        )
+        last_activity_id = node_ids.get(("activity", event_count - 1))
+        if last_activity_id:
+            dot.edge(last_activity_id, pred_node, color="#1d4ed8", style="dashed", penwidth="1.5")
+            dot.edge(last_activity_id, gt_node, color="#64748b", style="dotted", penwidth="1.5")
+
+        base_path, _ = os.path.splitext(output_path)
+        dot.render(base_path, format="png", cleanup=True)
+
+    def _non_empty_edge_index_dict(self, graph):
+        filtered = {}
+        for edge_type, edge_index in graph.edge_index_dict.items():
+            if edge_index is None:
+                continue
+            if edge_index.numel() == 0:
+                continue
+            if edge_index.dim() != 2 or edge_index.size(1) == 0:
+                continue
+            filtered[edge_type] = edge_index
+        return filtered
+
+    def explain_graph(self, graph):
+        graph = graph.to(self.device)
+        prediction = self._prediction_summary(graph)
+
+        target = None
+        if self.task == "activity":
+            target = prediction["predicted_index"]
+
+        edge_index_dict = self._non_empty_edge_index_dict(graph)
+        if not edge_index_dict:
+            raise RuntimeError(
+                "PROPHET explainability failed: the graph has no non-empty edge relations to explain."
+            )
+
+        explanation = self._explainer(
+            graph.x_dict,
+            edge_index_dict,
+            target=target,
+        )
+        return explanation, prediction
+
+    def summarize_local_explanation(self, graph, explanation, prediction):
+        node_rows = []
+        for node_type in graph.node_types:
+            node_mask = getattr(explanation[node_type], "node_mask", None)
+            if node_mask is None:
+                continue
+            node_mask = node_mask.detach().cpu().numpy()
+            if node_mask.ndim > 1:
+                node_scores = np.abs(node_mask).mean(axis=1)
+            else:
+                node_scores = np.abs(node_mask)
+            for idx, score in enumerate(node_scores):
+                node_rows.append(
+                    {
+                        "node_type": node_type,
+                        "node_index": idx,
+                        "label": self._node_label(graph, node_type, idx),
+                        "score": float(score),
+                    }
+                )
+
+        edge_rows = []
+        explanation_edge_types = getattr(explanation, "edge_types", [])
+        for edge_type in explanation_edge_types:
+            edge_mask = getattr(explanation[edge_type], "edge_mask", None)
+            if edge_mask is None:
+                continue
+            edge_mask = edge_mask.detach().cpu().numpy().reshape(-1)
+            edge_index = graph[edge_type].edge_index.detach().cpu().numpy()
+            rel_name = edge_type[1]
+            for idx, score in enumerate(edge_mask):
+                src_idx = int(edge_index[0, idx])
+                dst_idx = int(edge_index[1, idx])
+                edge_rows.append(
+                    {
+                        "edge_type": f"{edge_type[0]}->{rel_name}->{edge_type[2]}",
+                        "relation": rel_name,
+                        "source_type": edge_type[0],
+                        "target_type": edge_type[2],
+                        "source_index": src_idx,
+                        "target_index": dst_idx,
+                        "source_label": self._node_label(graph, edge_type[0], src_idx),
+                        "target_label": self._node_label(graph, edge_type[2], dst_idx),
+                        "score": float(abs(score)),
+                    }
+                )
+
+        return LocalExplanationArtifacts(
+            node_rows=node_rows,
+            edge_rows=edge_rows,
+            prediction_summary=prediction,
+        )
+
+    def _draw_local_hetero_graph(self, artifacts, output_path):
+        if self._draw_local_dfg_graphviz(artifacts, output_path):
+            return
+
+        node_df = pd.DataFrame(artifacts.node_rows)
+        edge_df = pd.DataFrame(artifacts.edge_rows)
+        prediction = artifacts.prediction_summary
+
+        node_colors = {
+            "activity": "#ef4444",
+            "resource": "#3b82f6",
+            "time": "#10b981",
+            "trace": "#8b5cf6",
+        }
+        relation_colors = {
+            "next": "#06b6d4",
+            "same_event": "#c75a22",
+            "same_time": "#c75a22",
+            "to_trace": "#94a3b8",
+            "belongs_to": "#94a3b8",
+            "has": "#94a3b8",
+        }
+        row_y = {"trace": 3.55, "activity": 2.6, "resource": 1.55, "time": 0.45}
+        node_df = node_df.sort_values(["node_type", "node_index"]).reset_index(drop=True)
+        event_count = max(
+            int(node_df[node_df["node_type"] == "activity"]["node_index"].max() + 1) if (node_df["node_type"] == "activity").any() else 0,
+            int(node_df[node_df["node_type"] == "resource"]["node_index"].max() + 1) if (node_df["node_type"] == "resource").any() else 0,
+            int(node_df[node_df["node_type"] == "time"]["node_index"].max() + 1) if (node_df["node_type"] == "time").any() else 0,
+        )
+        event_count = max(event_count, 1)
+        max_node_label_len = max((len(str(row.label)) for row in node_df.itertuples()), default=8)
+        event_gap = max(1.75, min(2.35, 0.9 + 0.055 * max_node_label_len))
+        graph_left = 1.65
+        x_positions = graph_left + np.arange(event_count, dtype=float) * event_gap
+        trace_x = float(np.mean(x_positions))
+        output_x = float(x_positions[-1]) + 2.0
+        x_max = output_x + 1.55
+        fig_width = max(18.0, min(34.0, 4.5 + 0.8 * x_max))
+
+        fig = plt.figure(figsize=(fig_width, 11))
+        gs = fig.add_gridspec(2, 1, height_ratios=[3.35, 1.25], hspace=0.14)
+        ax_graph = fig.add_subplot(gs[0])
+        ax_text = fig.add_subplot(gs[1])
+
+        pos = {}
+        graph_nx = nx.DiGraph()
+        for row in node_df.itertuples():
+            node_id = f"{row.node_type}:{row.node_index}"
+            if row.node_type == "trace":
+                pos[node_id] = (trace_x, row_y["trace"])
+            else:
+                x = float(x_positions[min(int(row.node_index), event_count - 1)])
+                pos[node_id] = (x, row_y.get(row.node_type, 0.5))
+            graph_nx.add_node(
+                node_id,
+                label=row.label,
+                score=float(row.score),
+                node_type=row.node_type,
+            )
+
+        edge_df = edge_df.sort_values("score", ascending=False).reset_index(drop=True)
+        edge_limit = min(14, len(edge_df))
+        display_edges = edge_df.head(edge_limit).copy()
+        if not display_edges.empty:
+            non_trace_edges = display_edges[
+                ~((display_edges["source_type"] == "trace") | (display_edges["target_type"] == "trace"))
+            ]
+            if len(non_trace_edges) < min(8, len(display_edges)):
+                extra_non_trace = edge_df[
+                    ~((edge_df["source_type"] == "trace") | (edge_df["target_type"] == "trace"))
+                ].head(6)
+                display_edges = (
+                    pd.concat([display_edges, extra_non_trace], ignore_index=True)
+                    .drop_duplicates(
+                        subset=["source_type", "source_index", "target_type", "target_index", "relation"]
+                    )
+                    .sort_values("score", ascending=False)
+                    .head(max(edge_limit, 6))
+                )
+
+        for row in display_edges.itertuples():
+            src_id = f"{row.source_type}:{row.source_index}"
+            dst_id = f"{row.target_type}:{row.target_index}"
+            if src_id not in pos or dst_id not in pos:
+                continue
+            graph_nx.add_edge(
+                src_id,
+                dst_id,
+                relation=row.relation,
+                score=float(row.score),
+            )
+
+        for step_idx, x in enumerate(x_positions, start=1):
+            ax_graph.text(x, 4.1, f"E{step_idx}", ha="center", va="center", fontsize=10, weight="bold", color="#475569")
+            ax_graph.axvline(x=x, ymin=0.09, ymax=0.9, color="#e2e8f0", linewidth=0.8, zorder=0)
+
+        row_label_x = 1.05
+        ax_graph.text(row_label_x, row_y["trace"], "Case context", va="center", ha="right", fontsize=10, color="#475569", weight="bold")
+        ax_graph.text(row_label_x, row_y["activity"], "Activity", va="center", ha="right", fontsize=10, color="#475569", weight="bold")
+        ax_graph.text(row_label_x, row_y["resource"], "Resource", va="center", ha="right", fontsize=10, color="#475569", weight="bold")
+        ax_graph.text(row_label_x, row_y["time"], "Time", va="center", ha="right", fontsize=10, color="#475569", weight="bold")
+
+        def wrapped_node_label(attrs):
+            label_width = 16 if attrs["node_type"] == "activity" else 18
+            if attrs["node_type"] == "time":
+                label_width = 20
+            return textwrap.fill(
+                str(attrs["label"]),
+                width=label_width,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+
+        def node_box_radii(node_id):
+            attrs = graph_nx.nodes[node_id]
+            wrapped = wrapped_node_label(attrs)
+            label_lines = wrapped.splitlines() + [f"{float(attrs['score']):.2f}"]
+            max_line_len = max((len(line) for line in label_lines), default=6)
+            rx = max(0.34, min(0.78, 0.055 * max_line_len + 0.08))
+            ry = 0.14 + 0.08 * max(1, len(label_lines))
+            return rx, ry
+
+        def edge_endpoints(src_id, dst_id):
+            src_x, src_y = pos[src_id]
+            dst_x, dst_y = pos[dst_id]
+            dx = dst_x - src_x
+            dy = dst_y - src_y
+            distance = float(np.hypot(dx, dy))
+            if distance <= 1e-6:
+                return (src_x, src_y), (dst_x, dst_y)
+            ux = dx / distance
+            uy = dy / distance
+
+            def boundary_distance(node_id):
+                rx, ry = node_box_radii(node_id)
+                tx = rx / abs(ux) if abs(ux) > 1e-6 else np.inf
+                ty = ry / abs(uy) if abs(uy) > 1e-6 else np.inf
+                return min(tx, ty)
+
+            src_shrink = min(boundary_distance(src_id), distance * 0.42)
+            dst_shrink = min(boundary_distance(dst_id), distance * 0.42)
+            return (
+                (src_x + ux * src_shrink, src_y + uy * src_shrink),
+                (dst_x - ux * dst_shrink, dst_y - uy * dst_shrink),
+            )
+
+        if graph_nx.number_of_edges() > 0:
+            edge_scores = [graph_nx.edges[e]["score"] for e in graph_nx.edges()]
+            max_edge = max(edge_scores) if edge_scores else 1.0
+            for edge in graph_nx.edges():
+                relation = graph_nx.edges[edge]["relation"]
+                src_x, src_y = pos[edge[0]]
+                dst_x, dst_y = pos[edge[1]]
+                if relation == "next" and abs(src_y - dst_y) < 0.02:
+                    rad = 0.0
+                elif "trace" in relation or graph_nx.nodes[edge[0]]["node_type"] == "trace" or graph_nx.nodes[edge[1]]["node_type"] == "trace":
+                    rad = -0.08
+                else:
+                    rad = 0.0
+                start, end = edge_endpoints(edge[0], edge[1])
+                ax_graph.add_patch(
+                    FancyArrowPatch(
+                        start,
+                        end,
+                        arrowstyle="-|>",
+                        mutation_scale=14,
+                        linewidth=1.4 + 5.2 * (graph_nx.edges[edge]["score"] / max(max_edge, 1e-6)),
+                        color=relation_colors.get(relation, "#c2410c"),
+                        linestyle="solid" if relation == "next" else "dashed",
+                        alpha=0.78,
+                        connectionstyle=f"arc3,rad={rad}",
+                        zorder=2,
+                    )
+                )
+
+        node_scores = np.array([graph_nx.nodes[n]["score"] for n in graph_nx.nodes()], dtype=float)
+        max_node = max(float(node_scores.max()), 1e-6) if len(node_scores) else 1.0
+        for node_id, attrs in graph_nx.nodes(data=True):
+            x, y = pos[node_id]
+            score = float(attrs["score"])
+            color = node_colors.get(attrs["node_type"], "#64748b")
+            size = 260 + 560 * (score / max_node)
+            ax_graph.scatter(
+                [x],
+                [y],
+                s=size,
+                color=color,
+                alpha=0.9,
+                edgecolors="white",
+                linewidths=1.6,
+                zorder=3,
+            )
+            label_color = color if attrs["node_type"] == "activity" and score >= max_node * 0.75 else "#0f172a"
+            label_text = f"{wrapped_node_label(attrs)}\n{score:.2f}"
+            ax_graph.text(
+                x,
+                y,
+                label_text,
+                ha="center",
+                va="center",
+                fontsize=8.4,
+                color=label_color,
+                weight="bold" if score >= max_node * 0.75 else "normal",
+                linespacing=0.95,
+                bbox={"boxstyle": "round,pad=0.22", "fc": "white", "ec": color, "alpha": 0.96},
+                zorder=4,
+            )
+
+        legend_handles = [
+            plt.Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                label="Case context" if node_type == "trace" else node_type.title(),
+                markerfacecolor=color,
+                markersize=9,
+            )
+            for node_type, color in node_colors.items()
+            if any(graph_nx.nodes[n]["node_type"] == node_type for n in graph_nx.nodes())
+        ]
+        legend_handles.extend(
+            [
+                plt.Line2D([0], [0], color="#06b6d4", lw=2.5, label="Sequence link"),
+                plt.Line2D([0], [0], color="#94a3b8", lw=2.0, linestyle="--", label="Case-context link"),
+            ]
+        )
+        ax_graph.legend(
+            handles=legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.01),
+            frameon=True,
+            ncol=min(6, len(legend_handles)),
+            borderaxespad=0.2,
+        )
+
+        last_event_x = float(x_positions[-1])
+        if prediction["task"] == "activity":
+            ax_graph.text(
+                output_x,
+                4.1,
+                "Model Output",
+                ha="center",
+                va="center",
+                fontsize=10,
+                weight="bold",
+                color="#475569",
+            )
+            ax_graph.annotate(
+                "",
+                xy=(output_x - 0.45, row_y["activity"] + 0.27),
+                xytext=(last_event_x + 0.45, row_y["activity"]),
+                arrowprops=dict(arrowstyle="->", color="#1d4ed8", linewidth=2.0, linestyle="--"),
+                zorder=2,
+            )
+            ax_graph.annotate(
+                "",
+                xy=(output_x - 0.45, row_y["activity"] - 0.27),
+                xytext=(last_event_x + 0.45, row_y["activity"]),
+                arrowprops=dict(arrowstyle="->", color="#64748b", linewidth=2.0, linestyle=":"),
+                zorder=2,
+            )
+            ax_graph.text(
+                output_x,
+                row_y["activity"] + 0.42,
+                textwrap.fill(f"Predicted next: {prediction['predicted_label']}", width=26),
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="#0f172a",
+                weight="bold",
+                bbox={"boxstyle": "round,pad=0.24", "fc": "#dbeafe", "ec": "#1d4ed8", "alpha": 0.98},
+                zorder=5,
+            )
+            ax_graph.text(
+                output_x,
+                row_y["activity"] - 0.28,
+                textwrap.fill(f"Ground truth: {prediction['true_label']}", width=26),
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="#0f172a",
+                bbox={"boxstyle": "round,pad=0.24", "fc": "#f8fafc", "ec": "#64748b", "alpha": 0.98},
+                zorder=5,
+            )
+            ax_graph.text(
+                output_x,
+                row_y["activity"] - 0.78,
+                f"Confidence: {prediction['confidence']:.3f}",
+                ha="center",
+                va="center",
+                fontsize=8.5,
+                color="#475569",
+                zorder=5,
+            )
+        else:
+            ax_graph.text(
+                output_x,
+                4.1,
+                "Model Output",
+                ha="center",
+                va="center",
+                fontsize=10,
+                weight="bold",
+                color="#475569",
+            )
+            ax_graph.annotate(
+                "",
+                xy=(output_x - 0.45, row_y["time"] + 0.28),
+                xytext=(last_event_x + 0.45, row_y["time"]),
+                arrowprops=dict(arrowstyle="->", color="#1d4ed8", linewidth=2.0, linestyle="--"),
+                zorder=2,
+            )
+            ax_graph.text(
+                output_x,
+                row_y["time"] + 0.45,
+                textwrap.fill(f"Predicted: {prediction['prediction_display']}", width=24),
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="#0f172a",
+                weight="bold",
+                bbox={"boxstyle": "round,pad=0.24", "fc": "#dbeafe", "ec": "#1d4ed8", "alpha": 0.98},
+                zorder=5,
+            )
+            ax_graph.text(
+                output_x,
+                row_y["time"] - 0.25,
+                textwrap.fill(f"Actual: {prediction['target_display']}", width=24),
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="#0f172a",
+                bbox={"boxstyle": "round,pad=0.24", "fc": "#f8fafc", "ec": "#64748b", "alpha": 0.98},
+                zorder=5,
+            )
+
+        title_lines = self._format_prediction_summary_lines(prediction)
+        wrapped_title_lines = []
+        case_title = self._case_title_line(prediction)
+        if case_title:
+            wrapped_title_lines.append(case_title)
+        for line in title_lines:
+            if ": " in line:
+                label, value = line.split(": ", 1)
+                wrapped = textwrap.wrap(
+                    value,
+                    width=95,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                if wrapped:
+                    wrapped_title_lines.append(f"{label}: {wrapped[0]}")
+                    wrapped_title_lines.extend([f"    {part}" for part in wrapped[1:]])
+                else:
+                    wrapped_title_lines.append(f"{label}:")
+            else:
+                wrapped_title_lines.extend(
+                    textwrap.wrap(
+                        line,
+                        width=105,
+                        break_long_words=False,
+                        break_on_hyphens=False,
+                    )
+                )
+
+        fig.text(
+            0.5,
+            0.985,
+            "Local Explanation",
+            ha="center",
+            va="top",
+            fontsize=16,
+            fontweight="bold",
+            color="#0f172a",
+        )
+        fig.text(
+            0.5,
+            0.962,
+            "\n".join(wrapped_title_lines),
+            ha="center",
+            va="top",
+            fontsize=11,
+            color="#0f172a",
+        )
+        fig.subplots_adjust(top=0.82)
+        ax_graph.set_xlim(0.0, x_max)
+        ax_graph.set_ylim(-0.05, 4.35)
+        ax_graph.set_axis_off()
+
+        ax_text.axis("off")
+
+        top_nodes = node_df.sort_values("score", ascending=False).head(3) if not node_df.empty else pd.DataFrame()
+        top_edges = edge_df.sort_values("score", ascending=False).head(2) if not edge_df.empty else pd.DataFrame()
+
+        if prediction["task"] == "activity":
+            is_correct = prediction["predicted_label"] == prediction["true_label"]
+            status_label = "Correct prediction" if is_correct else "Incorrect prediction"
+            status_color = "#15803d" if is_correct else "#b91c1c"
+            confidence = float(prediction["confidence"])
+            confidence_label = (
+                "High confidence" if confidence >= 0.7 else
+                "Moderate confidence" if confidence >= 0.4 else
+                "Low confidence"
+            )
+            cards = [
+                (
+                    "Prediction status",
+                    status_label,
+                    f"Predicted: {prediction['predicted_label']}",
+                    "#f8fafc",
+                    status_color,
+                ),
+                (
+                    "Ground truth",
+                    prediction["true_label"],
+                    "Observed next event",
+                    "#f8fafc",
+                    "#475569",
+                ),
+                (
+                    "Model confidence",
+                    f"{confidence:.3f}",
+                    confidence_label,
+                    "#eff6ff",
+                    "#1d4ed8",
+                ),
+            ]
+        else:
+            cards = [
+                (
+                    "Predicted",
+                    prediction["prediction_display"],
+                    "Model output",
+                    "#eff6ff",
+                    "#1d4ed8",
+                ),
+                (
+                    "Actual",
+                    prediction["target_display"],
+                    "Observed value",
+                    "#f8fafc",
+                    "#475569",
+                ),
+                (
+                    "Question",
+                    "Main drivers",
+                    prediction.get("explanation_question", self._regression_question()),
+                    "#f8fafc",
+                    "#0f172a",
+                ),
+            ]
+
+        for idx, (title, value, subtitle, fill_color, accent_color) in enumerate(cards):
+            left = 0.02 + idx * 0.32
+            ax_text.text(
+                left,
+                0.88,
+                title,
+                ha="left",
+                va="top",
+                fontsize=9,
+                color="#475569",
+                weight="bold",
+                transform=ax_text.transAxes,
+            )
+            ax_text.text(
+                left,
+                0.68,
+                textwrap.fill(str(value), width=26, break_long_words=False, break_on_hyphens=False),
+                ha="left",
+                va="top",
+                fontsize=12,
+                color=accent_color,
+                weight="bold",
+                bbox={"boxstyle": "round,pad=0.35", "fc": fill_color, "ec": accent_color, "alpha": 0.98},
+                transform=ax_text.transAxes,
+            )
+            ax_text.text(
+                left,
+                0.38,
+                textwrap.fill(str(subtitle), width=28, break_long_words=False, break_on_hyphens=False),
+                ha="left",
+                va="top",
+                fontsize=8.5,
+                color="#64748b",
+                transform=ax_text.transAxes,
+            )
+
+        if not top_nodes.empty:
+            driver_parts = [
+                f"{row.label} ({row.score:.2f})"
+                for row in top_nodes.itertuples()
+            ]
+            driver_text = textwrap.fill(
+                "Top drivers: " + " | ".join(driver_parts),
+                width=155,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            ax_text.text(
+                0.02,
+                0.16,
+                driver_text,
+                ha="left",
+                va="center",
+                fontsize=9,
+                color="#0f172a",
+                transform=ax_text.transAxes,
+            )
+
+        if not top_edges.empty:
+            relation_parts = [
+                f"{row.source_label} -> {row.target_label}"
+                for row in top_edges.itertuples()
+            ]
+            relation_text = textwrap.fill(
+                "Strongest links: " + " | ".join(relation_parts),
+                width=155,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            ax_text.text(
+                0.02,
+                0.02,
+                relation_text,
+                ha="left",
+                va="bottom",
+                fontsize=8.5,
+                color="#475569",
+                transform=ax_text.transAxes,
+            )
+
+        ax_text.text(
+            0.5,
+            0.0,
+            "Numerical values represent post-hoc explanation weights for nodes and edges in the explanation graph.",
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            color="#475569",
+            transform=ax_text.transAxes,
+            bbox={"boxstyle": "round,pad=0.35", "fc": "#f8fafc", "ec": "#cbd5e1", "alpha": 1.0},
+        )
+
+        fig.savefig(output_path, dpi=250, bbox_inches="tight")
+        plt.close(fig)
+
+    def global_view_importance(self, graphs):
+        rows = []
+        view_rows = []
+        fixed_views = ["time", "resource", "activity", "trace"]
+        has_informative_resource = self._has_informative_resource_view()
+        for graph in tqdm(graphs, desc="Global explainability"):
+            explanation, _ = self.explain_graph(graph)
+            graph_view_scores = {view: 0.0 for view in fixed_views}
+            for node_type in fixed_views:
+                if node_type == "resource" and not has_informative_resource:
+                    continue
+                if node_type not in graph.node_types:
+                    continue
+                node_mask = getattr(explanation[node_type], "node_mask", None)
+                if node_mask is None:
+                    continue
+                node_mask = node_mask.detach().cpu().numpy()
+                node_scores = np.abs(node_mask).mean(axis=1) if node_mask.ndim > 1 else np.abs(node_mask)
+                graph_view_scores[node_type] = float(np.mean(node_scores)) if len(node_scores) else 0.0
+            for view, score in graph_view_scores.items():
+                view_rows.append({"view": view, "score": score})
+
+            node_mask = getattr(explanation["activity"], "node_mask", None)
+            if node_mask is None:
+                continue
+            node_mask = node_mask.detach().cpu().numpy()
+            node_scores = np.abs(node_mask).mean(axis=1) if node_mask.ndim > 1 else np.abs(node_mask)
+            for idx, score in enumerate(node_scores):
+                label = self._node_label(graph, "activity", idx)
+                rows.append({"activity": label, "score": float(score)})
+
+        self._last_global_view_type_importance = self._summarize_view_type_importance(view_rows)
+        if not rows:
+            return pd.DataFrame(columns=["activity", "mean_score", "max_score", "count", "rank"])
+
+        df = pd.DataFrame(rows)
+        summary = (
+            df.groupby("activity", as_index=False)
+            .agg(
+                mean_score=("score", "mean"),
+                max_score=("score", "max"),
+                count=("score", "size"),
+            )
+            .sort_values(["mean_score", "max_score"], ascending=False)
+            .reset_index(drop=True)
+        )
+        summary["rank"] = np.arange(1, len(summary) + 1)
+        return summary
+
+    @staticmethod
+    def _summarize_view_type_importance(view_rows):
+        fixed_views = ["time", "resource", "activity", "trace"]
+        if view_rows:
+            raw_df = pd.DataFrame(view_rows)
+        else:
+            raw_df = pd.DataFrame(columns=["view", "score"])
+
+        rows = []
+        for rank, view in enumerate(fixed_views, start=1):
+            scores = raw_df[raw_df["view"] == view]["score"].to_numpy(dtype=float) if not raw_df.empty else np.array([])
+            if len(scores):
+                mean_score = float(np.mean(scores))
+                max_score = float(np.max(scores))
+                count = int(np.count_nonzero(scores))
+            else:
+                mean_score = 0.0
+                max_score = 0.0
+                count = 0
+            rows.append(
+                {
+                    "view": view,
+                    "mean_score": mean_score,
+                    "max_score": max_score,
+                    "count": count,
+                    "rank": rank,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def save_local_artifacts(self, artifacts, output_dir, sample_id):
+        os.makedirs(output_dir, exist_ok=True)
+
+        node_df = pd.DataFrame(artifacts.node_rows)
+        edge_df = pd.DataFrame(artifacts.edge_rows)
+        if not node_df.empty:
+            node_df = node_df.sort_values("score", ascending=False)
+        if not edge_df.empty:
+            edge_df = edge_df.sort_values("score", ascending=False)
+
+        node_path = os.path.join(output_dir, f"sample_{sample_id}_nodes.csv")
+        edge_path = os.path.join(output_dir, f"sample_{sample_id}_edges.csv")
+        pred_path = os.path.join(output_dir, f"sample_{sample_id}_summary.json")
+        desc_path = os.path.join(output_dir, f"sample_{sample_id}_description.txt")
+
+        node_df.to_csv(node_path, index=False)
+        edge_df.to_csv(edge_path, index=False)
+        with open(pred_path, "w", encoding="utf-8") as handle:
+            json.dump(artifacts.prediction_summary, handle, indent=2, default=_serialize_scalar)
+        with open(desc_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(self._sample_description(artifacts)))
+
+        _remove_file_if_exists(os.path.join(output_dir, f"sample_{sample_id}_explanation.png"))
+        _remove_file_if_exists(os.path.join(output_dir, f"sample_{sample_id}_graphviz_process.png"))
+        self._draw_local_hetero_graph(
+            artifacts,
+            os.path.join(output_dir, f"sample_{sample_id}_hetero_graph.png"),
+        )
+
+    def save_global_artifacts(self, global_df, output_dir, num_graphs_used):
+        os.makedirs(output_dir, exist_ok=True)
+        csv_path = os.path.join(output_dir, "global_view_importance.csv")
+        global_df.to_csv(csv_path, index=False)
+        global_df.to_csv(os.path.join(output_dir, "global_activity_importance.csv"), index=False)
+        _remove_file_if_exists(os.path.join(output_dir, "prophet_global_activity_importance.csv"))
+        _remove_file_if_exists(os.path.join(output_dir, "prophet_global_activity_importance.png"))
+        view_type_df = getattr(
+            self,
+            "_last_global_view_type_importance",
+            self._summarize_view_type_importance([]),
+        ).copy()
+        view_type_df.to_csv(os.path.join(output_dir, "global_node_type_view_importance.csv"), index=False)
+        self._plot_global_view_type_importance(
+            view_type_df,
+            os.path.join(output_dir, "global_node_type_view_importance.png"),
+        )
+
+        top_df = global_df.head(20).copy()
+        fig_height = max(6, 0.4 * max(len(top_df), 1) + 2)
+        fig, ax = plt.subplots(figsize=(12, fig_height))
+        ax.barh(top_df["activity"][::-1], top_df["mean_score"][::-1], color="#1d4e89")
+        ax.set_title(f"Global Activity Importance (n={int(num_graphs_used)} graphs)")
+        ax.set_xlabel("Mean Explanation Score")
+        ax.set_ylabel("Activity")
+        for row_idx, row in enumerate(top_df.iloc[::-1].itertuples(), start=0):
+            ax.text(
+                row.mean_score + max(top_df["mean_score"].max(), 1e-6) * 0.01,
+                row_idx,
+                f"count={int(row.count)}",
+                va="center",
+                fontsize=8,
+                color="#475569",
+            )
+        fig.tight_layout()
+        fig.savefig(os.path.join(output_dir, "global_activity_importance.png"), dpi=250, bbox_inches="tight")
+        plt.close(fig)
+
+    @staticmethod
+    def _plot_global_view_type_importance(view_type_df, output_path):
+        fixed_views = ["time", "resource", "activity", "trace"]
+        plot_df = (
+            view_type_df.set_index("view")
+            .reindex(fixed_views, fill_value=0.0)
+            .reset_index()
+        )
+        scores = plot_df["mean_score"].to_numpy(dtype=float)
+        y_max = max(0.15, float(scores.max()) * 1.12 if len(scores) else 0.15)
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.bar(plot_df["view"], scores, color="#2ca02c")
+        ax.set_title("Global View Importance", fontsize=20, pad=12)
+        ax.set_xlabel("View", fontsize=14)
+        ax.set_ylabel("Mean Explanation Score", fontsize=14)
+        ax.set_ylim(0.0, y_max)
+        ax.grid(True, axis="both", color="#cfcfcf", linewidth=1.2)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis="both", labelsize=12)
+        for spine in ax.spines.values():
+            spine.set_color("#cfcfcf")
+            spine.set_linewidth(1.2)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=250, bbox_inches="tight")
+        plt.close(fig)
+
+
+class GradientExplainer(ProphetGNNExplainer):
+    pass
+
+
+class TemporalGradientExplainer(ProphetGNNExplainer):
+    pass
+
+
+class GraphLIMEExplainer(ProphetGNNExplainer):
+    pass
+
+
+class GNNExplainabilityEvaluation:
+    """
+    Lightweight evaluation for heterogeneous GNN explanations.
+
+    The evaluation uses activity-node attributions because they are the most
+    stable, comparable sequence-aligned signal across graphs and tasks.
+    """
+
+    def __init__(self, explainer, task="activity"):
+        self.explainer = explainer
+        self.task = task
+        self.results = {}
+
+    @staticmethod
+    def _rankdata(values):
+        return pd.Series(np.asarray(values, dtype=float)).rank(method="average").to_numpy()
+
+    @classmethod
+    def _pearson_corr(cls, x, y):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        if x.size < 2 or y.size < 2:
+            return None
+        if np.allclose(x, x[0]) or np.allclose(y, y[0]):
+            return None
+        corr = np.corrcoef(x, y)[0, 1]
+        return None if not np.isfinite(corr) else float(corr)
+
+    @classmethod
+    def _spearman_corr(cls, x, y):
+        return cls._pearson_corr(cls._rankdata(x), cls._rankdata(y))
+
+    def _predict_graph(self, graph):
+        graph = graph.to(self.explainer.device)
+        self.explainer.model.eval()
+        with torch.no_grad():
+            act, event_time, remaining_time = self.explainer.model(graph)
+            if self.task == "activity":
+                probs = torch.softmax(act, dim=-1).view(-1)
+                pred_idx = int(torch.argmax(probs).item())
+                return {
+                    "raw": probs.detach().cpu().numpy(),
+                    "target_idx": pred_idx,
+                    "score": float(probs[pred_idx].item()),
+                }
+            if self.task == "event_time":
+                value = float(event_time.view(-1)[0].item())
+                return {"raw": value, "target_idx": None, "score": value}
+            value = float(remaining_time.view(-1)[0].item())
+            return {"raw": value, "target_idx": None, "score": value}
+
+    def _prediction_change(self, original_pred, updated_pred):
+        if self.task == "activity":
+            target_idx = original_pred["target_idx"]
+            return float(original_pred["raw"][target_idx] - updated_pred["raw"][target_idx])
+        return float(abs(original_pred["score"] - updated_pred["score"]))
+
+    def _mask_activity_positions(self, graph, indices, keep_only=False):
+        graph = graph.clone()
+        x = graph["activity"].x.clone()
+        indices = np.asarray(indices, dtype=np.int64).copy()
+        if keep_only:
+            masked = torch.zeros_like(x)
+            if len(indices):
+                index_tensor = torch.as_tensor(indices, dtype=torch.long, device=x.device)
+                masked[index_tensor] = x[index_tensor]
+            graph["activity"].x = masked
+        else:
+            if len(indices):
+                index_tensor = torch.as_tensor(indices, dtype=torch.long, device=x.device)
+                x[index_tensor] = 0
+            graph["activity"].x = x
+        return graph
+
+    @staticmethod
+    def _top_k_indices(sample_attr, k):
+        sample_attr = np.asarray(sample_attr, dtype=float).reshape(-1)
+        if sample_attr.size == 0:
+            return np.array([], dtype=int)
+        k = min(int(k), sample_attr.size)
+        if k <= 0:
+            return np.array([], dtype=int)
+        return np.argsort(np.abs(sample_attr))[-k:]
+
+    def _extract_activity_attributions(self, graph):
+        explanation, _ = self.explainer.explain_graph(graph)
+        node_mask = getattr(explanation["activity"], "node_mask", None)
+        if node_mask is None:
+            return None
+        node_mask = node_mask.detach().cpu().numpy()
+        return np.abs(node_mask).mean(axis=1) if node_mask.ndim > 1 else np.abs(node_mask)
+
+    def _extract_evaluation_attributions(self, graph):
+        explanation, _ = self.explainer.explain_graph(graph)
+        node_mask = getattr(explanation["activity"], "node_mask", None)
+        if node_mask is None:
+            return None, None
+
+        node_mask = node_mask.detach().cpu().numpy()
+        node_attr = np.abs(node_mask).mean(axis=1) if node_mask.ndim > 1 else np.abs(node_mask)
+        edge_endpoint_attr = np.zeros_like(node_attr, dtype=float)
+
+        explanation_edge_types = getattr(explanation, "edge_types", [])
+        for edge_type in explanation_edge_types:
+            edge_mask = getattr(explanation[edge_type], "edge_mask", None)
+            if edge_mask is None:
+                continue
+            edge_scores = np.abs(edge_mask.detach().cpu().numpy().reshape(-1))
+            edge_index = graph[edge_type].edge_index.detach().cpu().numpy()
+            source_type, _, target_type = edge_type
+            for edge_idx, score in enumerate(edge_scores):
+                src_idx = int(edge_index[0, edge_idx])
+                dst_idx = int(edge_index[1, edge_idx])
+                if source_type == "activity" and src_idx < len(edge_endpoint_attr):
+                    edge_endpoint_attr[src_idx] += float(score)
+                if target_type == "activity" and dst_idx < len(edge_endpoint_attr):
+                    edge_endpoint_attr[dst_idx] += float(score)
+
+        return node_attr, edge_endpoint_attr
+
+    def _collect_samples(self, graphs, max_samples=10):
+        samples = []
+        for graph in tqdm(graphs[:max_samples], desc="Collecting evaluation samples"):
+            attr, edge_attr = self._extract_evaluation_attributions(graph)
+            if attr is None or len(attr) == 0:
+                continue
+            samples.append(
+                {
+                    "graph": graph,
+                    "attr": np.asarray(attr, dtype=float),
+                    "edge_attr": None if edge_attr is None else np.asarray(edge_attr, dtype=float),
+                }
+            )
+        return samples
+
+    def faithfulness_correlation(self, samples, k_values=(5, 10, 15, 20, 25)):
         results = {}
+        for k in k_values:
+            pred_changes = []
+            importance_sums = []
+            for sample in samples:
+                attr = sample["attr"]
+                if len(attr) < k:
+                    continue
+                top_k = self._top_k_indices(attr, k)
+                if top_k.size == 0:
+                    continue
+                original_pred = self._predict_graph(sample["graph"])
+                masked_graph = self._mask_activity_positions(sample["graph"], top_k, keep_only=False)
+                masked_pred = self._predict_graph(masked_graph)
+                pred_changes.append(self._prediction_change(original_pred, masked_pred))
+                importance_sums.append(float(np.abs(attr[top_k]).sum()))
+            valid_count = len(pred_changes)
+            results[f"faithfulness_k{k}"] = {
+                "spearman_correlation": self._spearman_corr(importance_sums, pred_changes),
+                "pearson_correlation": self._pearson_corr(importance_sums, pred_changes),
+                "mean_pred_change": float(np.mean(pred_changes)) if pred_changes else None,
+                "std_pred_change": float(np.std(pred_changes)) if pred_changes else None,
+                "valid_sample_count": valid_count,
+            }
+        return results
 
+    def comprehensiveness(self, samples, k_values=(5, 10, 15, 20, 25)):
+        results = {}
+        for k in k_values:
+            scores = []
+            for sample in samples:
+                attr = sample["attr"]
+                if len(attr) < k:
+                    continue
+                top_k = self._top_k_indices(attr, k)
+                if top_k.size == 0:
+                    continue
+                original_pred = self._predict_graph(sample["graph"])
+                masked_graph = self._mask_activity_positions(sample["graph"], top_k, keep_only=False)
+                masked_pred = self._predict_graph(masked_graph)
+                scores.append(self._prediction_change(original_pred, masked_pred))
+            valid_count = len(scores)
+            results[f"comprehensiveness_k{k}"] = {
+                "mean": float(np.mean(scores)) if scores else None,
+                "std": float(np.std(scores)) if scores else None,
+                "median": float(np.median(scores)) if scores else None,
+                "valid_sample_count": valid_count,
+            }
+        return results
+
+    def sufficiency(self, samples, k_values=(5, 10, 15, 20, 25)):
+        results = {}
+        for k in k_values:
+            scores = []
+            for sample in samples:
+                attr = sample["attr"]
+                if len(attr) < k:
+                    continue
+                top_k = self._top_k_indices(attr, k)
+                if top_k.size == 0:
+                    continue
+                original_pred = self._predict_graph(sample["graph"])
+                top_only_graph = self._mask_activity_positions(sample["graph"], top_k, keep_only=True)
+                top_only_pred = self._predict_graph(top_only_graph)
+                scores.append(self._prediction_change(original_pred, top_only_pred))
+            valid_count = len(scores)
+            results[f"sufficiency_k{k}"] = {
+                "mean": float(np.mean(scores)) if scores else None,
+                "std": float(np.std(scores)) if scores else None,
+                "median": float(np.median(scores)) if scores else None,
+                "valid_sample_count": valid_count,
+            }
+        return results
+
+    def agreement(self, samples, k_values=(5, 10, 15, 20, 25)):
+        """
+        GNN-specific agreement between two explanation views:
+        activity-node attributions and activity-node scores induced by incident
+        edge attributions. This keeps agreement meaningful without requiring a
+        second external explainer.
+        """
+        results = {}
         for k in k_values:
             jaccard_scores = []
             overlap_scores = []
-            rank_correlations = []
-
-            for i in range(n_samples):
-                grad_attr = np.abs(grad_attributions[i])
-                lime_attr = np.abs(lime_attributions[i])
-                if not np.all(np.isfinite(grad_attr)) or not np.all(np.isfinite(lime_attr)):
+            for sample in samples:
+                node_attr = np.asarray(sample["attr"], dtype=float).reshape(-1)
+                edge_attr = sample.get("edge_attr")
+                if edge_attr is None:
                     continue
-
-                min_len = min(len(grad_attr), len(lime_attr))
-                grad_attr = grad_attr[:min_len]
-                lime_attr = lime_attr[:min_len]
-
-                if k > min_len:
+                edge_attr = np.asarray(edge_attr, dtype=float).reshape(-1)
+                usable_len = min(len(node_attr), len(edge_attr))
+                if usable_len < k:
                     continue
+                node_top = set(self._top_k_indices(node_attr[:usable_len], k).tolist())
+                edge_top = set(self._top_k_indices(edge_attr[:usable_len], k).tolist())
+                if not node_top or not edge_top:
+                    continue
+                intersection = len(node_top.intersection(edge_top))
+                union = len(node_top.union(edge_top))
+                jaccard_scores.append(float(intersection / union) if union else None)
+                overlap_scores.append(float(intersection / k))
 
-                grad_top_k = set(np.argsort(grad_attr)[-k:])
-                lime_top_k = set(np.argsort(lime_attr)[-k:])
-
-                intersection = len(grad_top_k & lime_top_k)
-                union = len(grad_top_k | lime_top_k)
-                jaccard = intersection / union if union > 0 else 0
-                jaccard_scores.append(jaccard)
-
-                overlap = intersection / k
-                overlap_scores.append(overlap)
-
-                from scipy.stats import spearmanr
-                if len(grad_attr) > 1:
-                    corr, _ = spearmanr(grad_attr, lime_attr)
-                    if not np.isnan(corr):
-                        rank_correlations.append(corr)
-
-            results[f'agreement_k{k}'] = {
-                'jaccard_similarity': float(np.mean(jaccard_scores)) if jaccard_scores else 0.0,
-                'top_k_overlap': float(np.mean(overlap_scores)) if overlap_scores else 0.0,
-                'rank_correlation': float(np.mean(rank_correlations)) if rank_correlations else 0.0
+            valid_count = len([score for score in jaccard_scores if score is not None])
+            results[f"agreement_k{k}"] = {
+                "jaccard_similarity": float(np.mean(jaccard_scores)) if valid_count else None,
+                "top_k_overlap": float(np.mean(overlap_scores)) if overlap_scores else None,
+                "valid_sample_count": valid_count,
             }
-
         return results
 
-    def monotonicity(self, graphs, attributions):
-        print("Computing Monotonicity...")
-        n_samples = min(len(graphs), 20)
+    def monotonicity(self, samples):
         monotonicity_scores = []
-
-        for i in range(n_samples):
-            orig_out = self._predict(graphs[i])
-            orig_pred = self._select_output(orig_out)
-            target_idx = self._target_index(orig_pred)
-            predictions = [self._target_score(orig_pred, target_idx).item()]
-
-            sample_attr = np.abs(attributions[i])
-            sorted_indices = np.argsort(sample_attr)[::-1]
-
-            act_features, res_features = self._feature_dims(graphs[i])
-            removed = []
-            for idx in sorted_indices[:min(10, len(sorted_indices))]:
-                removed.append(int(idx))
-                act_mask, res_mask = self._masks_from_indices(removed, act_features, res_features, keep=False)
-                masked_graph = self._mask_graph(graphs[i], act_mask, res_mask)
-                pred = self._target_score(self._select_output(self._predict(masked_graph)), target_idx).item()
-                predictions.append(pred)
-
-            n_monotonic = sum(1 for j in range(1, len(predictions)) if predictions[j] <= predictions[j-1])
-            monotonicity = n_monotonic / (len(predictions) - 1) if len(predictions) > 1 else 0
-            monotonicity_scores.append(monotonicity)
-
-        return {
-            'monotonicity': {
-                'mean': float(np.mean(monotonicity_scores)) if monotonicity_scores else 0.0,
-                'std': float(np.std(monotonicity_scores)) if monotonicity_scores else 0.0,
-                'median': float(np.median(monotonicity_scores)) if monotonicity_scores else 0.0
-            }
-        }
-
-    def temporal_consistency(self, node_contribs):
-        print("Computing Temporal Consistency...")
-        if not node_contribs:
-            return {'temporal_consistency': 'N/A - Missing node attributions'}
-
-        max_len = max(len(x) for x in node_contribs if len(x) > 0)
-        position_importance = np.zeros(max_len)
-        position_counts = np.zeros(max_len)
-
-        for contrib in node_contribs:
-            if len(contrib) == 0:
+        for sample in samples[:8]:
+            attr = sample["attr"]
+            order = np.argsort(np.abs(attr))[::-1]
+            if order.size <= 1:
                 continue
-            vals = np.abs(contrib)
-            position_importance[:len(vals)] += vals
-            position_counts[:len(vals)] += 1
-
-        avg_importance = np.divide(
-            position_importance,
-            position_counts,
-            where=position_counts > 0,
-            out=np.zeros_like(position_importance)
-        )
-
-        positions = np.arange(max_len)
-        valid_mask = position_counts > 0
-        from scipy.stats import spearmanr
-        if valid_mask.sum() > 2:
-            recency_corr, recency_p = spearmanr(positions[valid_mask], avg_importance[valid_mask])
-        else:
-            recency_corr, recency_p = 0.0, 1.0
-
-        valid_positions = positions[valid_mask]
-        valid_importance = avg_importance[valid_mask]
-
+            original_pred = self._predict_graph(sample["graph"])
+            previous_score = original_pred["score"]
+            monotonic_steps = 0
+            for cut in range(1, min(len(order), 10) + 1):
+                masked_graph = self._mask_activity_positions(sample["graph"], order[:cut], keep_only=False)
+                masked_pred = self._predict_graph(masked_graph)
+                current_score = masked_pred["score"]
+                if self.task == "activity":
+                    if current_score <= previous_score:
+                        monotonic_steps += 1
+                else:
+                    if abs(current_score - original_pred["score"]) >= abs(previous_score - original_pred["score"]):
+                        monotonic_steps += 1
+                previous_score = current_score
+            denom = max(min(len(order), 10), 1)
+            monotonicity_scores.append(monotonic_steps / denom)
         return {
-            'temporal_consistency': {
-                'recency_correlation': float(recency_corr) if not np.isnan(recency_corr) else 0.0,
-                'recency_p_value': float(recency_p) if not np.isnan(recency_p) else 1.0,
-                'position_importance': avg_importance.tolist(),
-                'most_important_position': int(valid_positions[np.argmax(valid_importance)]) if valid_positions.size else 0,
-                'least_important_position': int(valid_positions[np.argmin(valid_importance)]) if valid_positions.size else 0
+            "monotonicity": {
+                "mean": float(np.mean(monotonicity_scores)) if monotonicity_scores else None,
+                "std": float(np.std(monotonicity_scores)) if monotonicity_scores else None,
+                "median": float(np.median(monotonicity_scores)) if monotonicity_scores else None,
+                "valid_sample_count": len(monotonicity_scores),
             }
         }
 
-    def run_full_benchmark(self, graphs, grad_values, lime_values=None, node_contribs=None, k_values=[1, 3, 5, 10]):
-        print("\n" + "="*60)
-        print("EXPLAINABILITY BENCHMARK EVALUATION")
-        print("="*60)
+    def stability(self, samples):
+        cosine_scores = []
+        variance_scores = []
+        for sample in samples[:5]:
+            attr = sample["attr"]
+            recomputed = []
+            for cut in range(min(3, len(attr))):
+                mask_idx = np.array([int(np.argsort(np.abs(attr))[cut])], dtype=int)
+                perturbed_graph = self._mask_activity_positions(sample["graph"], mask_idx, keep_only=False)
+                perturbed_attr = self._extract_activity_attributions(perturbed_graph)
+                if perturbed_attr is None:
+                    continue
+                min_len = min(len(attr), len(perturbed_attr))
+                base = np.asarray(attr[:min_len], dtype=float)
+                pert = np.asarray(perturbed_attr[:min_len], dtype=float)
+                denom = np.linalg.norm(base) * np.linalg.norm(pert)
+                cosine = 1.0 if denom == 0 and np.allclose(base, pert) else (float(np.dot(base, pert) / denom) if denom > 0 else 0.0)
+                if np.isfinite(cosine):
+                    cosine_scores.append(cosine)
+                recomputed.append(pert)
+            if recomputed:
+                variance_scores.append(float(np.var(np.stack(recomputed, axis=0), axis=0).mean()))
+        return {
+            "stability": {
+                "mean_variance": float(np.mean(variance_scores)) if variance_scores else 0.0,
+                "max_variance": float(np.max(variance_scores)) if variance_scores else 0.0,
+                "mean_cosine_similarity": float(np.mean(cosine_scores)) if cosine_scores else 0.0,
+                "stability_score": float(np.mean(cosine_scores)) if cosine_scores else 0.0,
+            }
+        }
 
-        act_features, res_features = self._feature_dims(graphs[0]) if graphs else (0, 0)
+    @staticmethod
+    def _hoyer_sparsity(values):
+        values = np.abs(np.asarray(values, dtype=float).reshape(-1))
+        n = values.size
+        if n <= 1:
+            return None
+        l2 = float(np.linalg.norm(values))
+        if l2 <= 0:
+            return None
+        l1 = float(values.sum())
+        score = (np.sqrt(n) - (l1 / l2)) / (np.sqrt(n) - 1.0)
+        return float(np.clip(score, 0.0, 1.0))
+
+    @staticmethod
+    def _effective_active_fraction(values):
+        values = np.abs(np.asarray(values, dtype=float).reshape(-1))
+        n = values.size
+        if n == 0:
+            return None
+        total = float(values.sum())
+        sq_sum = float(np.square(values).sum())
+        if total <= 0 or sq_sum <= 0:
+            return None
+        effective_nodes = (total * total) / sq_sum
+        return float(np.clip(effective_nodes / n, 0.0, 1.0))
+
+    def sparsity(self, samples):
+        sparsity_scores = []
+        active_fractions = []
+        mass_top3 = []
+        mass_top5 = []
+        for sample in samples:
+            attr = np.abs(np.asarray(sample["attr"], dtype=float).reshape(-1))
+            if attr.size == 0:
+                continue
+            total_mass = float(attr.sum())
+            if total_mass <= 0:
+                continue
+            sparsity_score = self._hoyer_sparsity(attr)
+            active_fraction = self._effective_active_fraction(attr)
+            if sparsity_score is not None:
+                sparsity_scores.append(sparsity_score)
+            if active_fraction is not None:
+                active_fractions.append(active_fraction)
+            sorted_mass = np.sort(attr)[::-1]
+            mass_top3.append(float(sorted_mass[: min(3, len(sorted_mass))].sum() / total_mass))
+            mass_top5.append(float(sorted_mass[: min(5, len(sorted_mass))].sum() / total_mass))
+        return {
+            "sparsity": {
+                "active_fraction": float(np.mean(active_fractions)) if active_fractions else None,
+                "sparsity_score": float(np.mean(sparsity_scores)) if sparsity_scores else None,
+                "top3_mass_fraction": float(np.mean(mass_top3)) if mass_top3 else None,
+                "top5_mass_fraction": float(np.mean(mass_top5)) if mass_top5 else None,
+                "valid_sample_count": len(sparsity_scores),
+            }
+        }
+
+    def temporal_consistency(self, samples):
+        if not samples:
+            return {
+                "temporal_consistency": {
+                    "recency_correlation": None,
+                    "position_importance": [],
+                    "valid_sample_count": 0,
+                }
+            }
+        num_bins = 10
+        totals = np.zeros(num_bins, dtype=float)
+        counts = np.zeros(num_bins, dtype=float)
+        recency_correlations = []
+        for sample in samples:
+            attr = np.abs(np.asarray(sample["attr"], dtype=float).reshape(-1))
+            if attr.size <= 1:
+                continue
+            relative_position = np.linspace(0.0, 1.0, attr.size)
+            corr = self._spearman_corr(relative_position, attr)
+            if corr is not None:
+                recency_correlations.append(float(corr))
+
+            bin_indices = np.minimum((relative_position * num_bins).astype(int), num_bins - 1)
+            for bin_idx, score in zip(bin_indices, attr):
+                totals[bin_idx] += float(score)
+                counts[bin_idx] += 1.0
+
+        avg = np.divide(totals, counts, out=np.zeros_like(totals), where=counts > 0)
+        valid = np.where(counts > 0)[0]
+        position_importance = [
+            float(avg[idx]) if counts[idx] > 0 else None
+            for idx in range(num_bins)
+        ]
+        return {
+            "temporal_consistency": {
+                "recency_correlation": float(np.mean(recency_correlations)) if recency_correlations else None,
+                "position_importance": position_importance,
+                "most_important_position": int(valid[np.argmax(avg[valid])]) if len(valid) else 0,
+                "least_important_position": int(valid[np.argmin(avg[valid])]) if len(valid) else 0,
+                "valid_sample_count": len(recency_correlations),
+            }
+        }
+
+    def run_full_evaluation(self, graphs, k_values=(5, 10, 15, 20, 25), max_samples=10):
+        print("\n" + "=" * 60)
+        print("GNN EXPLAINABILITY EVALUATION")
+        print("=" * 60)
+        samples = self._collect_samples(graphs, max_samples=max_samples)
         results = {
-            'metadata': {
-                'task': self.task,
-                'n_samples': len(graphs),
-                'n_features': int(grad_values.shape[1]) if grad_values is not None and grad_values.size > 0 else 0,
-                'activity_features': int(act_features),
-                'resource_features': int(res_features),
-                'k_values': k_values
+            "metadata": {
+                "task": self.task,
+                "n_samples": len(samples),
+                "k_values": list(k_values),
             }
         }
-
-        try:
-            results['faithfulness'] = self.faithfulness_correlation(graphs, grad_values, k_values)
-        except Exception as e:
-            print(f"[WARNING] Faithfulness computation failed: {e}")
-            results['faithfulness'] = {'error': str(e)}
-
-        try:
-            results['comprehensiveness'] = self.comprehensiveness(graphs, grad_values, k_values)
-        except Exception as e:
-            print(f"[WARNING] Comprehensiveness computation failed: {e}")
-            results['comprehensiveness'] = {'error': str(e)}
-
-        try:
-            results['sufficiency'] = self.sufficiency(graphs, grad_values, k_values)
-        except Exception as e:
-            print(f"[WARNING] Sufficiency computation failed: {e}")
-            results['sufficiency'] = {'error': str(e)}
-
-        try:
-            results['monotonicity'] = self.monotonicity(graphs, grad_values)
-        except Exception as e:
-            print(f"[WARNING] Monotonicity computation failed: {e}")
-            results['monotonicity'] = {'error': str(e)}
-
-        try:
-            results['stability'] = self.stability(graphs, grad_values)
-        except Exception as e:
-            print(f"[WARNING] Stability computation failed: {e}")
-            results['stability'] = {'error': str(e)}
-
-        if lime_values is not None:
-            try:
-                results['method_agreement'] = self.method_agreement(grad_values, lime_values, k_values)
-            except Exception as e:
-                print(f"[WARNING] Method agreement computation failed: {e}")
-                results['method_agreement'] = {'error': str(e)}
-
-        try:
-            results['temporal_consistency'] = self.temporal_consistency(node_contribs or [])
-        except Exception as e:
-            print(f"[WARNING] Temporal consistency computation failed: {e}")
-            results['temporal_consistency'] = {'error': str(e)}
-
+        results["faithfulness"] = self.faithfulness_correlation(samples, k_values=k_values)
+        results["comprehensiveness"] = self.comprehensiveness(samples, k_values=k_values)
+        results["sufficiency"] = self.sufficiency(samples, k_values=k_values)
+        results["agreement"] = self.agreement(samples, k_values=k_values)
+        results["monotonicity"] = self.monotonicity(samples)
+        results["stability"] = self.stability(samples)
+        results["sparsity"] = self.sparsity(samples)
+        results["temporal_consistency"] = self.temporal_consistency(samples)
         self.results = results
         return results
 
-    def save_results(self, output_dir, filename='benchmark_results.json'):
+    def save_results(self, output_dir, filename="evaluation_results.json"):
+        os.makedirs(output_dir, exist_ok=True)
         filepath = os.path.join(output_dir, filename)
-        with open(filepath, 'w') as f:
-            json.dump(self.results, f, indent=2, default=str)
-        print(f"[OK] Benchmark results saved to: {filepath}")
+        with open(filepath, "w", encoding="utf-8") as handle:
+            json.dump(self.results, handle, indent=2, default=_serialize_scalar)
+        print(f"[OK] Evaluation results saved to: {filepath}")
 
-        summary_rows = self.summary_rows()
-
-        if summary_rows:
-            summary_df = pd.DataFrame(summary_rows)
-            summary_path = os.path.join(output_dir, filename.replace('.json', '_summary.csv'))
-            summary_df.to_csv(summary_path, index=False)
-            print(f"[OK] Benchmark summary saved to: {summary_path}")
-
-        return filepath
-
-    def summary_rows(self, task_prefix=None):
         summary_rows = []
-        for metric_name, metric_data in self.results.items():
-            if metric_name == 'metadata':
+        task_name = self.results.get("metadata", {}).get("task", self.task)
+        for category, metric_data in self.results.items():
+            if category == "metadata" or not isinstance(metric_data, dict):
                 continue
-            if isinstance(metric_data, dict):
-                for sub_key, sub_val in metric_data.items():
-                    if isinstance(sub_val, dict):
-                        for k, v in sub_val.items():
-                            if isinstance(v, (int, float)):
-                                metric_label = f"{sub_key}_{k}"
-                                if task_prefix:
-                                    metric_label = f"{task_prefix}_{metric_label}"
-                                summary_rows.append({
-                                    'category': metric_name,
-                                    'metric': metric_label,
-                                    'value': v
-                                })
-                    elif isinstance(sub_val, (int, float)):
-                        metric_label = sub_key
-                        if task_prefix:
-                            metric_label = f"{task_prefix}_{metric_label}"
-                        summary_rows.append({
-                            'category': metric_name,
-                            'metric': metric_label,
-                            'value': sub_val
-                        })
-        return summary_rows
+            for sub_key, sub_val in metric_data.items():
+                if isinstance(sub_val, dict):
+                    for metric_name, value in sub_val.items():
+                        if isinstance(value, (int, float)):
+                            summary_rows.append(
+                                {
+                                    "category": category,
+                                    "metric": f"{task_name}_{sub_key}_{metric_name}",
+                                    "value": value,
+                                }
+                            )
+                elif isinstance(sub_val, (int, float)):
+                    summary_rows.append(
+                        {
+                            "category": category,
+                            "metric": f"{task_name}_{sub_key}",
+                            "value": sub_val,
+                        }
+                    )
 
-    def print_summary(self):
-        if not self.results:
-            print("No benchmark results available.")
-            return
-
-        print("\n" + "="*60)
-        print("BENCHMARK SUMMARY")
-        print("="*60)
-
-        if 'faithfulness' in self.results and 'error' not in self.results['faithfulness']:
-            print("\nFAITHFULNESS (Higher = Better)")
-            for k, v in self.results['faithfulness'].items():
-                if isinstance(v, dict):
-                    corr = v.get('spearman_correlation', 'N/A')
-                    print(f"   {k}: Spearman={corr:.4f}" if isinstance(corr, float) else f"   {k}: {corr}")
-
-        if 'comprehensiveness' in self.results and 'error' not in self.results['comprehensiveness']:
-            print("\nCOMPREHENSIVENESS (Higher = Better)")
-            for k, v in self.results['comprehensiveness'].items():
-                if isinstance(v, dict):
-                    mean = v.get('mean', 'N/A')
-                    print(f"   {k}: Mean={mean:.4f}" if isinstance(mean, float) else f"   {k}: {mean}")
-
-        if 'sufficiency' in self.results and 'error' not in self.results['sufficiency']:
-            print("\nSUFFICIENCY (Lower = Better)")
-            for k, v in self.results['sufficiency'].items():
-                if isinstance(v, dict):
-                    mean = v.get('mean', 'N/A')
-                    print(f"   {k}: Mean={mean:.4f}" if isinstance(mean, float) else f"   {k}: {mean}")
-
-        if 'monotonicity' in self.results and 'error' not in self.results['monotonicity']:
-            mono = self.results['monotonicity'].get('monotonicity', {})
-            mean = mono.get('mean', 'N/A')
-            print(f"\nMONOTONICITY (Higher = Better): {mean:.4f}" if isinstance(mean, float) else f"\nMONOTONICITY: {mean}")
-
-        if 'method_agreement' in self.results and 'error' not in self.results['method_agreement']:
-            print("\nMETHOD AGREEMENT (Gradient vs GraphLIME)")
-            for k, v in self.results['method_agreement'].items():
-                if isinstance(v, dict):
-                    jaccard = v.get('jaccard_similarity', 'N/A')
-                    overlap = v.get('top_k_overlap', 'N/A')
-                    print(f"   {k}: Jaccard={jaccard:.4f}, Overlap={overlap:.2%}"
-                          if isinstance(jaccard, float) else f"   {k}: {jaccard}")
-
-        if 'temporal_consistency' in self.results and 'error' not in self.results['temporal_consistency']:
-            tc = self.results['temporal_consistency'].get('temporal_consistency', {})
-            recency = tc.get('recency_correlation', 'N/A')
-            print(f"\nTEMPORAL CONSISTENCY (Recency Correlation): {recency:.4f}"
-                  if isinstance(recency, float) else f"\nTEMPORAL CONSISTENCY: {recency}")
-
-        print("\n" + "="*60)
+        summary_df = pd.DataFrame(summary_rows)
+        summary_path = os.path.join(output_dir, "evaluation_summary.csv")
+        summary_df.to_csv(summary_path, index=False)
+        print(f"[OK] Evaluation summary saved to: {summary_path}")
+        return filepath, summary_df
 
 
-def generate_feature_importance_summary(grad_dir, lime_dir, output_dir, task='activity'):
-    summary_data = []
-    
-    grad_file = os.path.join(grad_dir, f'gradient_global_{task}.csv')
-    if os.path.exists(grad_file):
-        grad_df = pd.read_csv(grad_file)
-        for _, row in grad_df.iterrows():
-            summary_data.append({
-                'Feature': row['Feature'],
-                'Method': 'Gradient',
-                'Importance': row['Importance'],
-                'Type': row.get('Type', 'Unknown')
-            })
-    
-    lime_files = [f for f in os.listdir(lime_dir) if f.startswith('graphlime_sample_') and f.endswith(f'_{task}.csv')]
-    if lime_files:
-        lime_aggregated = {}
-        for lime_file in lime_files:
-            lime_df = pd.read_csv(os.path.join(lime_dir, lime_file))
-            for _, row in lime_df.iterrows():
-                feature = row['Feature']
-                weight = abs(row['Weight'])
-                if feature not in lime_aggregated:
-                    lime_aggregated[feature] = []
-                lime_aggregated[feature].append(weight)
-        
-        for feature, weights in lime_aggregated.items():
-            summary_data.append({
-                'Feature': feature,
-                'Method': 'GraphLIME',
-                'Importance': np.mean(weights),
-                'Type': 'Activity' if 'Activity' in feature else 'Resource'
-            })
-    
-    if summary_data:
-        summary_df = pd.DataFrame(summary_data)
-        summary_df = summary_df.sort_values('Importance', ascending=False)
-        summary_df.to_csv(os.path.join(output_dir, f'feature_importance_summary_{task}.csv'), index=False)
-        print(f"[OK] Feature importance summary saved for {task}")
-    
-    return summary_df if summary_data else None
-
-
-def generate_comparison_report(grad_dir, lime_dir, output_dir, task='activity'):
-    report_path = os.path.join(output_dir, f'comparison_report_{task}.txt')
-    
-    with open(report_path, 'w') as f:
-        f.write("="*70 + "\n")
-        f.write(f"GNN EXPLAINABILITY COMPARISON REPORT - {task.upper()}\n")
-        f.write("="*70 + "\n\n")
-        
-        grad_file = os.path.join(grad_dir, f'gradient_global_{task}.csv')
-        if os.path.exists(grad_file):
-            grad_df = pd.read_csv(grad_file)
-            f.write("GRADIENT-BASED SALIENCY:\n")
-            f.write("-" * 70 + "\n")
-            f.write(f"Total features analyzed: {len(grad_df)}\n")
-            f.write(f"Top feature: {grad_df.iloc[-1]['Feature']} ({grad_df.iloc[-1]['Importance']:.4f})\n")
-            
-            activity_count = len(grad_df[grad_df['Type'] == 'Activity'])
-            resource_count = len(grad_df[grad_df['Type'] == 'Resource'])
-            f.write(f"Activity features: {activity_count}\n")
-            f.write(f"Resource features: {resource_count}\n\n")
-        
-        lime_files = [f for f in os.listdir(lime_dir) if f.startswith('graphlime_sample_') and f.endswith(f'_{task}.csv')]
-        if lime_files:
-            f.write("GRAPHLIME LOCAL ANALYSIS:\n")
-            f.write("-" * 70 + "\n")
-            f.write(f"Samples analyzed: {len(lime_files)}\n")
-            
-            all_features = []
-            for lime_file in lime_files:
-                lime_df = pd.read_csv(os.path.join(lime_dir, lime_file))
-                all_features.extend(lime_df['Feature'].tolist())
-            
-            unique_features = len(set(all_features))
-            f.write(f"Unique features identified: {unique_features}\n")
-            f.write(f"Most common feature: {max(set(all_features), key=all_features.count)}\n\n")
-        
-        f.write("METHOD COMPARISON:\n")
-        f.write("-" * 70 + "\n")
-        f.write("Gradient Method:\n")
-        f.write("  + Global feature importance\n")
-        f.write("  + Considers all node types (activity + resource)\n")
-        f.write("  + Fast computation\n")
-        f.write("  - Less interpretable for individual predictions\n\n")
-        
-        f.write("GraphLIME Method:\n")
-        f.write("  + Local explanations for individual samples\n")
-        f.write("  + Highly interpretable\n")
-        f.write("  + Now includes resource features\n")
-        f.write("  - Slower computation\n")
-        f.write("  - May vary between samples\n\n")
-        
-        f.write("Temporal Gradient Method:\n")
-        f.write("  + Shows contribution over time steps\n")
-        f.write("  + Visualizes observed data alongside gradients\n")
-        f.write("  + Good for understanding sequential patterns\n")
-        f.write("  - Requires sequential/temporal data structure\n\n")
-        
-        f.write("="*70 + "\n")
-        f.write("RECOMMENDATION:\n")
-        f.write("-" * 70 + "\n")
-        f.write("Use Gradient for: Overall model behavior understanding\n")
-        f.write("Use GraphLIME for: Understanding specific predictions\n")
-        f.write("Use Temporal Gradient for: Time-series attribution analysis\n")
-        f.write("="*70 + "\n")
-    
-    print(f"[OK] Comparison report saved for {task}")
-
-
-def run_gnn_explainability(model, data, output_dir, device, vocabularies=None, num_samples=50, methods='all', tasks=None, scaler=None, y_true=None, run_benchmark=True):
-    os.makedirs(output_dir, exist_ok=True)
-    
-    print("\n" + "="*70)
-    print("GNN EXPLAINABILITY - SHAP-STYLE VISUALIZATION")
-    print("="*70)
-    
-    if 'test_graphs' in data:
-        graphs = data['test_graphs']
-    elif 'test' in data:
-        graphs = data['test']
+def _parse_sample_indices(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[\s,;]+", value.strip())
+    elif isinstance(value, (list, tuple, set)):
+        parts = list(value)
     else:
-        print("Error: Could not find test graphs in data object.")
-        return
+        parts = [value]
+
+    indices = []
+    for part in parts:
+        if part in {None, ""}:
+            continue
+        try:
+            parsed = int(part)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            indices.append(parsed)
+    return indices
+
+
+def _normalize_sampling_strategy(value):
+    strategy = str(value or "evenly_spaced").strip().lower()
+    return strategy if strategy in {"evenly_spaced", "random", "manual", "diverse"} else "evenly_spaced"
+
+
+def _select_sample_indices(
+    num_graphs,
+    sample_count,
+    strategy="evenly_spaced",
+    seed=42,
+    manual_indices=None,
+    original_indices=None,
+    prefix_lengths=None,
+):
+    sample_count = min(int(sample_count), num_graphs)
+    if sample_count <= 0:
+        return []
+    strategy = _normalize_sampling_strategy(strategy)
+    original_indices = list(original_indices) if original_indices is not None else list(range(num_graphs))
+
+    if strategy == "manual":
+        original_to_position = {int(original_idx): pos for pos, original_idx in enumerate(original_indices)}
+        selected = []
+        seen = set()
+        for original_idx in manual_indices or []:
+            position = original_to_position.get(int(original_idx))
+            if position is None or position in seen:
+                continue
+            selected.append(position)
+            seen.add(position)
+            if len(selected) >= sample_count:
+                break
+        return selected
+
+    if strategy == "random":
+        try:
+            parsed_seed = int(seed)
+        except (TypeError, ValueError):
+            parsed_seed = 42
+        rng = np.random.default_rng(parsed_seed)
+        return sorted(rng.choice(num_graphs, size=sample_count, replace=False).astype(int).tolist())
+
+    if strategy == "diverse" and prefix_lengths and len(prefix_lengths) == num_graphs:
+        ordered_positions = [
+            pos for pos, _ in sorted(
+                enumerate(prefix_lengths),
+                key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0, item[0]),
+            )
+        ]
+        if sample_count == 1:
+            return [ordered_positions[0]]
+        selected_offsets = sorted(set(np.linspace(0, num_graphs - 1, sample_count, dtype=int).tolist()))
+        return sorted(ordered_positions[offset] for offset in selected_offsets)
+
+    if sample_count == 1:
+        return [0]
+    return sorted(set(np.linspace(0, num_graphs - 1, sample_count, dtype=int).tolist()))
+
+
+def _collect_task_seconds(graphs, task):
+    seconds_values = []
+    for graph in graphs:
+        if task == "event_time":
+            raw = getattr(graph, "y_timestamp", None)
+        elif task == "remaining_time":
+            raw = getattr(graph, "y_remaining_time", None)
+        else:
+            continue
+        if raw is None:
+            continue
+        raw_value = float(raw.view(-1)[0].item())
+        seconds_values.append(ProphetGNNExplainer._decode_log_seconds(raw_value))
+    return seconds_values
+
+
+def _collect_display_seconds(graphs):
+    seconds_values = []
+    for graph in graphs:
+        if "time" not in graph.node_types:
+            continue
+        display_seconds = getattr(graph["time"], "display_seconds", None)
+        if display_seconds is None:
+            continue
+        values = display_seconds.detach().cpu().view(-1).numpy().tolist()
+        seconds_values.extend(float(value) for value in values if np.isfinite(value) and float(value) >= 0)
+    return seconds_values
+
+
+def _to_optional_int(value):
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "item"):
+            value = value.item()
+        if value == "":
+            return None
+        parsed = int(value)
+        return parsed if parsed >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _graph_prefix_length(graph):
+    raw_prefix = getattr(graph, "prefix_id", None)
+    prefix_length = _to_optional_int(raw_prefix)
+    if prefix_length is not None and prefix_length > 0:
+        return prefix_length
+
+    try:
+        activity_store = graph["activity"]
+        num_nodes = getattr(activity_store, "num_nodes", None)
+        if num_nodes is not None:
+            return int(num_nodes)
+        x = getattr(activity_store, "x", None)
+        if x is not None:
+            return int(x.shape[0])
+    except Exception:
+        pass
+
+    return None
+
+
+def _filter_graphs_by_prefix_length(graphs, min_prefix_length=None, max_prefix_length=None):
+    min_prefix = _to_optional_int(min_prefix_length)
+    max_prefix = _to_optional_int(max_prefix_length)
+    if min_prefix is None:
+        min_prefix = 1
+    if max_prefix is not None and max_prefix < min_prefix:
+        raise RuntimeError(
+            f"Invalid explainability prefix range: min_prefix_length={min_prefix}, max_prefix_length={max_prefix}."
+        )
+
+    filtered = []
+    skipped_unknown = 0
+    original_indices = []
+    for idx, graph in enumerate(graphs):
+        prefix_length = _graph_prefix_length(graph)
+        if prefix_length is None:
+            skipped_unknown += 1
+            continue
+        if prefix_length < min_prefix:
+            continue
+        if max_prefix is not None and prefix_length > max_prefix:
+            continue
+        filtered.append(graph)
+        original_indices.append(idx)
+
+    if not filtered:
+        range_label = f">= {min_prefix}" if max_prefix is None else f"{min_prefix}..{max_prefix}"
+        raise RuntimeError(
+            "No test graphs matched the explainability prefix length range "
+            f"({range_label}). Skipped {skipped_unknown} graphs with unknown prefix length."
+        )
+
+    return filtered, min_prefix, max_prefix, original_indices
+
+
+def run_gnn_explainability(
+    model,
+    data,
+    output_dir,
+    device,
+    vocabularies=None,
+    num_samples=50,
+    local_num_samples=10,
+    methods="all",
+    tasks=None,
+    scaler=None,
+    y_true=None,
+    run_evaluation=True,
+    global_sample_percent=1,
+    evaluation_sample_count=None,
+    min_prefix_length=None,
+    max_prefix_length=None,
+    evaluation_sampling_strategy="evenly_spaced",
+    evaluation_random_seed=42,
+    evaluation_sample_indices=None,
+    evaluation_protocol_name=None,
+):
+    del methods, scaler, y_true
+    os.makedirs(output_dir, exist_ok=True)
+
+    graphs = data.get("test_graphs") or data.get("test") or []
+    if not graphs:
+        raise RuntimeError("No test graphs available for GNN explainability.")
+    original_graph_count = len(graphs)
+    graphs, applied_min_prefix, applied_max_prefix, filtered_original_indices = _filter_graphs_by_prefix_length(
+        graphs,
+        min_prefix_length=min_prefix_length,
+        max_prefix_length=max_prefix_length,
+    )
+    print(
+        "[INFO] Explainability prefix filter: "
+        f"min={applied_min_prefix}, max={applied_max_prefix or 'none'}, "
+        f"kept={len(graphs)}/{original_graph_count} test graphs"
+    )
 
     if tasks is None:
-        print("[!] WARNING: No tasks specified")
-        return {}
-    
-    if isinstance(tasks, str):
+        tasks = ["activity"]
+    elif isinstance(tasks, str):
         tasks = [tasks]
+
+    summary = {}
+    evaluation_results = {}
+    evaluation_frames = []
+    local_num_samples = max(0, int(local_num_samples))
+    sampling_strategy = _normalize_sampling_strategy(evaluation_sampling_strategy)
+    manual_indices = _parse_sample_indices(evaluation_sample_indices)
+    random_seed = _to_optional_int(evaluation_random_seed)
+    if random_seed is None:
+        random_seed = 42
+    prefix_lengths = [_graph_prefix_length(graph) for graph in graphs]
+    sample_indices = _select_sample_indices(
+        len(graphs),
+        local_num_samples,
+        strategy=sampling_strategy,
+        seed=random_seed,
+        manual_indices=manual_indices,
+        original_indices=filtered_original_indices,
+        prefix_lengths=prefix_lengths,
+    )
     
-    print(f"\n[INFO] Tasks: {tasks}")
-    print(f"[INFO] Samples: {num_samples}")
-    
-    if methods in ['gradient', 'all']:
-        print("\n" + "-"*70)
-        print("GRADIENT ANALYSIS (SHAP-STYLE)")
-        print("-"*70)
-        
-        explainer = GradientExplainer(model, device, vocabularies)
-        grad_dir = os.path.join(output_dir, 'gradient')
-        
-        for task in tasks:
-            print(f"\n[{task.upper()}]")
-            
-            try:
-                if task == 'activity':
-                    imp = explainer.explain_global_activity(graphs, num_samples)
-                    explainer.plot_global_importance_activity(imp, grad_dir)
-                    
-                elif task in ['event_time', 'remaining_time']:
-                    print(f"  Creating individual sample explanations...")
-                    num_individual = min(5, len(graphs))
-                    
-                    sample_indices = []
-                    if len(graphs) > 100:
-                        sample_indices = [
-                            len(graphs) // 4,
-                            len(graphs) // 2,
-                            3 * len(graphs) // 4,
-                            len(graphs) - 100,
-                            len(graphs) - 50,
-                        ]
-                    else:
-                        start = min(10, len(graphs) // 3)
-                        sample_indices = list(range(start, min(start + num_individual, len(graphs))))
-                    
-                    for i, idx in enumerate(sample_indices):
-                        print(f"  Sample {i} (graph index {idx}):")
-                        graph = graphs[idx]
-                        contrib, pred, true_val, step_info = explainer.explain_individual_sample(graph, task)
-                        explainer.plot_individual_gradient_explanation(contrib, pred, true_val, step_info, grad_dir, task, i)
-                    
-            except Exception as e:
-                print(f"[ERROR] Failed {task}: {e}")
-        if not _dir_has_png(grad_dir):
-            print("[WARNING] No gradient plots generated.")
+    global_sample_percent = float(global_sample_percent)
+    global_sample_percent = min(max(global_sample_percent, 0.0), 100.0)
+    num_global_graphs = max(1, int(np.ceil(len(graphs) * (global_sample_percent / 100.0))))
+    global_indices = _select_sample_indices(
+        len(graphs),
+        num_global_graphs,
+        strategy=sampling_strategy,
+        seed=random_seed,
+        manual_indices=manual_indices,
+        original_indices=filtered_original_indices,
+        prefix_lengths=prefix_lengths,
+    )
+    global_graphs = [graphs[i] for i in global_indices]
+    parsed_evaluation_sample_count = _to_optional_int(evaluation_sample_count)
+    if parsed_evaluation_sample_count is not None:
+        parsed_evaluation_sample_count = max(1, min(parsed_evaluation_sample_count, len(graphs)))
+        evaluation_indices = _select_sample_indices(
+            len(graphs),
+            parsed_evaluation_sample_count,
+            strategy=sampling_strategy,
+            seed=random_seed,
+            manual_indices=manual_indices,
+            original_indices=filtered_original_indices,
+            prefix_lengths=prefix_lengths,
+        )
+        evaluation_graphs = [graphs[i] for i in evaluation_indices]
+    else:
+        evaluation_indices = global_indices
+        evaluation_graphs = list(global_graphs)
 
-    if methods in ['temporal', 'all']:
-        print("\n[Temporal Gradient Attribution]")
-        temporal_explainer = TemporalGradientExplainer(model, device, vocabularies, scaler)
-        temporal_dir = os.path.join(output_dir, 'temporal')
-        
-        for task in tasks:
-            try:
-                temporal_explainer.generate_temporal_plots(
-                    graphs, temporal_dir, task, 
-                    num_samples=min(10, num_samples),
-                    y_true=y_true
-                )
-                print(f"[OK] {task.capitalize()} Temporal Gradient plots saved.")
-            except Exception as e:
-                print(f"[ERROR] Failed temporal {task}: {e}")
-                import traceback
-                traceback.print_exc()
-        if not _dir_has_png(temporal_dir):
-            print("[WARNING] No temporal plots generated.")
+    if local_num_samples > 0 and not sample_indices:
+        raise RuntimeError(
+            "GNN explainability protocol selected no valid local test graphs. "
+            "Check evaluation_sample_indices or sampling configuration."
+        )
+    if not global_indices:
+        raise RuntimeError(
+            "GNN explainability protocol selected no valid global test graphs. "
+            "Check evaluation_sample_indices or sampling configuration."
+        )
+    if run_evaluation and not evaluation_indices:
+        raise RuntimeError(
+            "GNN explainability protocol selected no valid evaluation test graphs. "
+            "Check evaluation_sample_indices or sampling configuration."
+        )
 
-    if methods in ['lime', 'all']:
-        print("\n" + "-"*70)
-        print("GRAPHLIME LOCAL ANALYSIS")
-        print("-"*70)
-        
-        lime_explainer = GraphLIMEExplainer(model, device, vocabularies)
-        lime_dir = os.path.join(output_dir, 'graphlime')
-        
-        max_lime_samples = min(10, len(graphs))
-        step = max(1, len(graphs) // max_lime_samples)
-        sample_ids = list(range(0, len(graphs), step))[:max_lime_samples]
-        
-        print(f"Analyzing {len(sample_ids)} diverse samples: {sample_ids}")
-        
-        for idx in sample_ids:
-            graph = graphs[idx]
-            print(f"\nSample {idx}:")
-            
-            for task in tasks:
-                try:
-                    print(f"  Processing {task}...")
-                    imp, score, true_val, step_info, pred_class = lime_explainer.explain_local(graph, task)
-                    lime_explainer.plot_local_explanation(imp, score, true_val, step_info, lime_dir, task, idx, pred_class)
-                    
-                except Exception as e:
-                    print(f"[ERROR] Failed Sample {idx} {task}: {e}")
+    local_original_indices = [filtered_original_indices[i] for i in sample_indices]
+    global_original_indices = [filtered_original_indices[i] for i in global_indices]
+    evaluation_original_indices = [filtered_original_indices[i] for i in evaluation_indices]
+    evaluation_protocol = {
+        "name": evaluation_protocol_name or "Perturbation-Based Explainability Evaluation",
+        "model_family": "gnn",
+        "tasks": tasks,
+        "sampling_strategy": sampling_strategy,
+        "random_seed": random_seed,
+        "manual_sample_indices": manual_indices,
+        "min_prefix_length": applied_min_prefix,
+        "max_prefix_length": applied_max_prefix,
+        "original_test_graph_count": original_graph_count,
+        "valid_pool_size": len(graphs),
+        "valid_original_graph_indices": filtered_original_indices,
+        "global_sample_percent": global_sample_percent,
+        "requested_global_sample_count": num_global_graphs,
+        "requested_local_sample_count": local_num_samples,
+        "requested_evaluation_sample_count": parsed_evaluation_sample_count,
+        "actual_global_sample_count": len(global_indices),
+        "actual_local_sample_count": len(sample_indices),
+        "actual_evaluation_sample_count": len(evaluation_indices),
+        "local_sample_indices": local_original_indices,
+        "global_sample_indices": global_original_indices,
+        "evaluation_sample_indices": evaluation_original_indices,
+    }
+    if run_evaluation:
+        evaluation_dir = os.path.join(output_dir, "evaluation")
+        os.makedirs(evaluation_dir, exist_ok=True)
+        protocol_path = os.path.join(evaluation_dir, "evaluation_protocol.json")
+        with open(protocol_path, "w", encoding="utf-8") as handle:
+            json.dump(evaluation_protocol, handle, indent=2, default=_serialize_scalar)
+        print(f"[OK] Evaluation protocol saved to: {protocol_path}")
 
-        if not _dir_has_png(lime_dir):
-            print("[WARNING] No GraphLIME plots generated.")
+    for task in tasks:
+        task_dir = os.path.join(output_dir, "prophet", task)
+        local_dir = os.path.join(task_dir, "local")
+        global_dir = os.path.join(task_dir, "global")
+        os.makedirs(local_dir, exist_ok=True)
+        os.makedirs(global_dir, exist_ok=True)
 
-    if methods == 'all':
-        print("\n[Generating Comprehensive Analysis]")
-        grad_dir = os.path.join(output_dir, 'gradient')
-        lime_dir = os.path.join(output_dir, 'graphlime')
-        
-        for task in tasks:
-            try:
-                generate_feature_importance_summary(grad_dir, lime_dir, output_dir, task)
-                generate_comparison_report(grad_dir, lime_dir, output_dir, task)
-            except Exception as e:
-                print(f"[ERROR] Failed to generate summary for {task}: {e}")
+        display_seconds = _collect_display_seconds(graphs)
+        preferred_time_unit = ProphetGNNExplainer.choose_preferred_time_unit(display_seconds)
+        if task in {"event_time", "remaining_time"}:
+            task_seconds = _collect_task_seconds(graphs, task)
+            preferred_time_unit = ProphetGNNExplainer.choose_preferred_time_unit(task_seconds or display_seconds)
 
-    benchmark_results = None
-    combined_summary_rows = []
-    if run_benchmark and methods in ['gradient', 'all']:
-        print("\n[Benchmark Evaluation]")
-        bench_dir = os.path.join(output_dir, 'benchmark')
-        os.makedirs(bench_dir, exist_ok=True)
+        explainer = ProphetGNNExplainer(
+            model=model,
+            device=device,
+            task=task,
+            vocabularies=vocabularies,
+            preferred_time_unit=preferred_time_unit,
+        )
 
-        if graphs:
-            sample_count = min(num_samples, len(graphs))
-            sample_indices = np.random.choice(len(graphs), sample_count, replace=False)
-            bench_graphs = [graphs[i] for i in sample_indices]
-        else:
-            bench_graphs = []
+        for sample_id, graph_idx in tqdm(enumerate(sample_indices), total=len(sample_indices), desc=f"Local explanations ({task})"):
+            graph = graphs[graph_idx]
+            explanation, prediction = explainer.explain_graph(graph)
+            artifacts = explainer.summarize_local_explanation(graph, explanation, prediction)
+            explainer.save_local_artifacts(artifacts, local_dir, sample_id)
 
-        for task in tasks:
-            try:
-                benchmark = ExplainabilityBenchmark(model, device, task=task, vocabs=vocabularies)
-                grad_attr, node_contribs = benchmark.compute_gradient_attributions(bench_graphs)
+        global_df = explainer.global_view_importance(global_graphs)
+        explainer.save_global_artifacts(global_df, global_dir, len(global_graphs))
 
-                lime_attr = None
-                if methods in ['lime', 'all']:
-                    lime_explainer = GraphLIMEExplainer(model, device, vocabularies)
-                    if bench_graphs:
-                        act_features, res_features = benchmark._feature_dims(bench_graphs[0])
-                        lime_vectors = []
-                        for g in bench_graphs:
-                            exp_list, _, _, _, _ = lime_explainer.explain_local(g, task)
-                            lime_vectors.append(
-                                benchmark.vectorize_graphlime(exp_list, act_features, res_features)
-                            )
-                        if lime_vectors:
-                            lime_attr = np.stack(lime_vectors, axis=0)
+        if run_evaluation:
+            evaluation_dir = os.path.join(output_dir, "evaluation")
+            evaluation = GNNExplainabilityEvaluation(explainer, task=task)
+            task_evaluation_results = evaluation.run_full_evaluation(evaluation_graphs, max_samples=len(evaluation_graphs))
+            task_filename = f"evaluation_results_{task}.json"
+            _, task_summary_df = evaluation.save_results(evaluation_dir, filename=task_filename)
+            evaluation_results[task] = task_evaluation_results
+            if not task_summary_df.empty:
+                task_summary_df = task_summary_df.copy()
+                task_summary_df["task"] = task
+                evaluation_frames.append(task_summary_df)
 
-                if grad_attr.size > 0:
-                    benchmark_results = benchmark.run_full_benchmark(
-                        bench_graphs,
-                        grad_attr,
-                        lime_values=lime_attr,
-                        node_contribs=node_contribs,
-                        k_values=[1, 3, 5, 10]
-                    )
-                    benchmark.save_results(bench_dir, filename=f'benchmark_results_{task}.json')
-                    combined_summary_rows.extend(benchmark.summary_rows(task_prefix=task))
-                    benchmark.print_summary()
-                else:
-                    print("[WARNING] Benchmark skipped: no gradient attributions available.")
-            except Exception as e:
-                print(f"[ERROR] Benchmark evaluation failed for {task}: {e}")
+        summary[task] = {
+            "sample_indices": local_original_indices,
+            "filtered_sample_positions": sample_indices,
+            "num_candidate_graphs": len(graphs),
+            "original_num_candidate_graphs": original_graph_count,
+            "min_prefix_length": applied_min_prefix,
+            "max_prefix_length": applied_max_prefix,
+            "num_global_graphs": len(global_graphs),
+            "global_sample_percent": global_sample_percent,
+            "num_evaluation_graphs": len(evaluation_graphs),
+            "evaluation_sample_count": parsed_evaluation_sample_count,
+            "evaluation_sample_indices": evaluation_original_indices,
+            "filtered_evaluation_sample_positions": evaluation_indices,
+            "sampling_strategy": sampling_strategy,
+            "random_seed": random_seed,
+            "manual_sample_indices": manual_indices,
+            "protocol_name": evaluation_protocol["name"],
+            "top_global_view": None if global_df.empty else str(global_df.iloc[0]["activity"]),
+            "top_global_activity": None if global_df.empty else str(global_df.iloc[0]["activity"]),
+            "evaluation_enabled": bool(run_evaluation),
+        }
 
-        if combined_summary_rows:
-            combined_df = pd.DataFrame(combined_summary_rows)
-            combined_path = os.path.join(bench_dir, 'benchmark_summary.csv')
-            combined_df.to_csv(combined_path, index=False)
-            print(f"[OK] Combined benchmark summary saved to: {combined_path}")
+    summary_path = os.path.join(output_dir, "prophet_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, default=_serialize_scalar)
 
-    if methods in ['gradient', 'all'] and not _dir_has_png(os.path.join(output_dir, 'gradient')):
-        raise RuntimeError("GNN explainability failed: gradient plots were not generated.")
-    if methods == 'temporal' and not _dir_has_png(os.path.join(output_dir, 'temporal')):
-        raise RuntimeError("GNN explainability failed: temporal plots were not generated.")
-    if methods in ['lime', 'all'] and not _dir_has_png(os.path.join(output_dir, 'graphlime')):
-        raise RuntimeError("GNN explainability failed: GraphLIME plots were not generated.")
+    if run_evaluation and evaluation_results:
+        evaluation_dir = os.path.join(output_dir, "evaluation")
+        os.makedirs(evaluation_dir, exist_ok=True)
+        combined_json_path = os.path.join(evaluation_dir, "evaluation_results.json")
+        with open(combined_json_path, "w", encoding="utf-8") as handle:
+            json.dump(evaluation_results, handle, indent=2, default=_serialize_scalar)
+        if evaluation_frames:
+            combined_df = pd.concat(evaluation_frames, ignore_index=True)
+            combined_df.to_csv(os.path.join(evaluation_dir, "evaluation_summary.csv"), index=False)
+            print(f"[OK] Combined evaluation summary saved to: {os.path.join(evaluation_dir, 'evaluation_summary.csv')}")
+        print(f"[OK] Combined evaluation results saved to: {combined_json_path}")
 
-    print("\n" + "="*70)
-    print("GNN EXPLAINABILITY ANALYSIS COMPLETE")
-    print(f"Results saved to: {output_dir}")
-    print("="*70)
-    
-    return {}
+    prophet_root = os.path.join(output_dir, "prophet")
+    if local_num_samples > 0 and not _dir_has_png(os.path.join(prophet_root, tasks[0], "local")):
+        raise RuntimeError("PROPHET explainability failed: no local explanation plots were generated.")
+    if not _dir_has_png(os.path.join(prophet_root, tasks[0], "global")):
+        raise RuntimeError("PROPHET explainability failed: no global explanation plots were generated.")
+
+    return summary
 
 
 class GNNExplainerWrapper:
     def __init__(self, model, device, vocabularies=None, scaler=None):
+        del scaler
         self.model = model
         self.device = device
         self.vocabularies = vocabularies
-        self.scaler = scaler
 
-    def run(self, data, output_dir, num_samples=50, methods='all', tasks=None, y_true=None, run_benchmark=True):
+    def run(
+        self,
+        data,
+        output_dir,
+        num_samples=50,
+        local_num_samples=10,
+        methods="all",
+        tasks=None,
+        y_true=None,
+        run_evaluation=True,
+        global_sample_percent=1,
+        evaluation_sample_count=None,
+        min_prefix_length=None,
+        max_prefix_length=None,
+        evaluation_sampling_strategy="evenly_spaced",
+        evaluation_random_seed=42,
+        evaluation_sample_indices=None,
+        evaluation_protocol_name=None,
+    ):
         return run_gnn_explainability(
             model=self.model,
             data=data,
@@ -2210,9 +2605,17 @@ class GNNExplainerWrapper:
             device=self.device,
             vocabularies=self.vocabularies,
             num_samples=num_samples,
+            local_num_samples=local_num_samples,
             methods=methods,
             tasks=tasks,
-            scaler=self.scaler,
             y_true=y_true,
-            run_benchmark=run_benchmark
+            run_evaluation=run_evaluation,
+            global_sample_percent=global_sample_percent,
+            evaluation_sample_count=evaluation_sample_count,
+            min_prefix_length=min_prefix_length,
+            max_prefix_length=max_prefix_length,
+            evaluation_sampling_strategy=evaluation_sampling_strategy,
+            evaluation_random_seed=evaluation_random_seed,
+            evaluation_sample_indices=evaluation_sample_indices,
+            evaluation_protocol_name=evaluation_protocol_name,
         )

@@ -116,6 +116,23 @@ class PipelineUnitTests(unittest.TestCase):
             self._record(name, False, str(exc))
             raise
 
+    def test_detect_and_standardize_columns_org_group_resource(self):
+        name = "detect_and_standardize_columns_org_group_resource"
+        try:
+            df = pd.DataFrame({
+                "case:concept:name": ["1", "1", "2"],
+                "concept:name": ["A", "B", "C"],
+                "time:timestamp": ["2024-01-01", "2024-01-02", "2024-01-03"],
+                "org:group": ["Nursing ward", "ER Registration", "Nursing ward"],
+            })
+            df_out, mapping = backend_main.detect_and_standardize_columns(df)
+            self.assertIn("Resource", df_out.columns)
+            self.assertEqual(mapping["org:group"], "Resource")
+            self._record(name, True)
+        except Exception as exc:
+            self._record(name, False, str(exc))
+            raise
+
     def test_detect_case_column(self):
         name = "detect_case_column"
         try:
@@ -159,6 +176,22 @@ class PipelineUnitTests(unittest.TestCase):
             self.assertEqual(detected["activity"], "concept:name")
             self.assertEqual(detected["timestamp"], "time:timestamp")
             self.assertEqual(detected["resource"], "org:resource")
+            self._record(name, True)
+        except Exception as exc:
+            self._record(name, False, str(exc))
+            raise
+
+    def test_detect_original_column_mapping_org_group_resource(self):
+        name = "detect_original_column_mapping_org_group_resource"
+        try:
+            df = pd.DataFrame({
+                "case:concept:name": ["1", "1", "2"],
+                "concept:name": ["A", "B", "C"],
+                "time:timestamp": ["2024-01-01", "2024-01-02", "2024-01-03"],
+                "org:group": ["Nursing ward", "ER Registration", "Nursing ward"],
+            })
+            detected = backend_main._detect_original_column_mapping(df)
+            self.assertEqual(detected["resource"], "org:group")
             self._record(name, True)
         except Exception as exc:
             self._record(name, False, str(exc))
@@ -560,6 +593,24 @@ class PipelineUnitTests(unittest.TestCase):
             self._record(name, False, str(exc))
             raise
 
+    def test_universal_column_detector_org_group_resource(self):
+        name = "universal_column_detector_org_group_resource"
+        try:
+            df = pd.DataFrame({
+                "case:concept:name": ["1", "1", "2"],
+                "concept:name": ["A", "B", "C"],
+                "time:timestamp": ["2024-01-01", "2024-01-02", "2024-01-03"],
+                "org:group": ["Nursing ward", "ER Registration", "Nursing ward"],
+            })
+            detector = utils_column_detector.UniversalColumnDetector(df)
+            detected, mapping = detector.detect_all()
+            self.assertEqual(detected.get("resource"), "org:group")
+            self.assertEqual(mapping.get("org:group"), "Resource")
+            self._record(name, True)
+        except Exception as exc:
+            self._record(name, False, str(exc))
+            raise
+
     def test_universal_column_detector_custom_pattern(self):
         name = "universal_column_detector_custom_pattern"
         original = list(utils_column_detector.UniversalColumnDetector.KNOWN_PATTERNS.get("case_id", []))
@@ -799,20 +850,20 @@ class PipelineUnitTests(unittest.TestCase):
             self._record(name, False, str(exc))
             raise
 
-    def test_explainability_benchmark_utils(self):
-        name = "explainability_benchmark_utils"
+    def test_explainability_evaluation_utils(self):
+        name = "explainability_evaluation_utils"
         try:
             try:
                 from explainability.transformers.transformer_explainer import (
-                    compare_benchmark_results,
-                    generate_benchmark_latex_table,
+                    compare_evaluation_results,
+                    generate_evaluation_latex_table,
                 )
             except Exception as import_exc:
                 self._record(name, True, f"skipped: {import_exc}")
                 return
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                json_path = os.path.join(tmpdir, "benchmark.json")
+                json_path = os.path.join(tmpdir, "evaluation.json")
                 payload = {
                     "faithfulness": {"faithfulness_k5": {"spearman_correlation": 0.5}},
                     "comprehensiveness": {"comprehensiveness_k5": {"mean": 0.1}},
@@ -824,9 +875,9 @@ class PipelineUnitTests(unittest.TestCase):
                 with open(json_path, "w", encoding="utf-8") as f:
                     json.dump(payload, f)
 
-                df = compare_benchmark_results([("modelA", json_path)])
+                df = compare_evaluation_results([("modelA", json_path)])
                 self.assertEqual(len(df), 1)
-                latex = generate_benchmark_latex_table(df)
+                latex = generate_evaluation_latex_table(df)
                 self.assertIn("\\begin{table}", latex)
             self._record(name, True)
         except Exception as exc:
@@ -869,6 +920,23 @@ class PipelineUnitTests(unittest.TestCase):
             self.assertIn("Activity", df_out.columns)
             self.assertIn("Timestamp", df_out.columns)
             self.assertEqual(mapping.get("case:concept:name"), "CaseID")
+            self._record(name, True)
+        except Exception as exc:
+            self._record(name, False, str(exc))
+            raise
+
+    def test_ppm_pipeline_org_group_resource_detection(self):
+        name = "ppm_pipeline_org_group_resource_detection"
+        try:
+            df = pd.DataFrame({
+                "case:concept:name": ["1", "1", "2"],
+                "concept:name": ["A", "B", "C"],
+                "time:timestamp": ["2024-01-01", "2024-01-02", "2024-01-03"],
+                "org:group": ["Nursing ward", "ER Registration", "Nursing ward"],
+            })
+            df_out, mapping, _ = ppm_pipeline.detect_and_standardize_columns(df, verbose=False)
+            self.assertIn("Resource", df_out.columns)
+            self.assertEqual(mapping.get("org:group"), "Resource")
             self._record(name, True)
         except Exception as exc:
             self._record(name, False, str(exc))

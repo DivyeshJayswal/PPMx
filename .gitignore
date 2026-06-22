@@ -69,3 +69,11 @@ testcase_results/
 testcase_dataset/
 testrun_results/
 today_changes_summary_2026-05-20.txt
+PROPHET_paper_summary.md
+test_evaluation.py
+tmp_gnn_next_activity_header_check
+tmp_gnn_next_activity_output_boxes
+tmp_gnn_next_activity_smoke
+tmp_graphviz_activity_test
+tmp_small_test_run
+docs

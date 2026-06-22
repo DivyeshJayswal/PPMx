@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import os
 
 from ..model import build_next_activity_model
+from .training_logger import EpochMetricsLogger
 
 
 class NextActivityPredictor:
@@ -194,13 +195,15 @@ class NextActivityPredictor:
             verbose=1
         )
         
+        epoch_logger = EpochMetricsLogger()
+
         self.history = self.model.fit(
             data['X_train'], data['y_train'],
             validation_data=(data['X_val'], data['y_val']),
             epochs=epochs,
             batch_size=batch_size,
-            callbacks=[early_stopping],
-            verbose=1
+            callbacks=[epoch_logger, early_stopping],
+            verbose=0
         )
         
         print("\nTraining completed!")
@@ -264,20 +267,24 @@ class NextActivityPredictor:
         os.makedirs(output_dir, exist_ok=True)
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        epochs = np.arange(1, len(self.history.history["loss"]) + 1)
+        epoch_xlim = (0.5, 1.5) if len(epochs) == 1 else (1, int(epochs[-1]))
         
-        ax1.plot(self.history.history["accuracy"], label="Training Accuracy", linewidth=2)
-        ax1.plot(self.history.history["val_accuracy"], label="Validation Accuracy", linewidth=2)
+        ax1.plot(epochs, self.history.history["accuracy"], label="Training Accuracy", linewidth=2)
+        ax1.plot(epochs, self.history.history["val_accuracy"], label="Validation Accuracy", linewidth=2)
         ax1.set_title("Model Accuracy Over Time", fontsize=14)
         ax1.set_xlabel("Epoch", fontsize=12)
         ax1.set_ylabel("Accuracy", fontsize=12)
+        ax1.set_xlim(*epoch_xlim)
         ax1.legend(fontsize=11)
         ax1.grid(True, alpha=0.3)
         
-        ax2.plot(self.history.history["loss"], label="Training Loss", linewidth=2)
-        ax2.plot(self.history.history["val_loss"], label="Validation Loss", linewidth=2)
+        ax2.plot(epochs, self.history.history["loss"], label="Training Loss", linewidth=2)
+        ax2.plot(epochs, self.history.history["val_loss"], label="Validation Loss", linewidth=2)
         ax2.set_title("Model Loss Over Time", fontsize=14)
         ax2.set_xlabel("Epoch", fontsize=12)
         ax2.set_ylabel("Loss", fontsize=12)
+        ax2.set_xlim(*epoch_xlim)
         ax2.legend(fontsize=11)
         ax2.grid(True, alpha=0.3)
         

@@ -144,6 +144,10 @@ def main():
 
     dataset_meta = read_json(datasets_meta_path)
     dataset_path = dataset_meta["stored_path"]
+    dataset_display_name = (
+        dataset_meta.get("original_filename")
+        or os.path.basename(dataset_meta.get("raw_path") or dataset_path)
+    )
 
     model_type = (req.get("model_type") or "").lower().strip()
     task = (req.get("task") or "").lower().strip()
@@ -154,6 +158,7 @@ def main():
     val_split = float(split.get("val_split", 0.5))
 
     config = req.get("config") or {}
+    explainability_config = req.get("explainability_config") or {}
     explainability = normalize_explainability(req.get("explainability", None))
 
     mapping_mode = (req.get("mapping_mode") or "").strip().lower() or "auto"
@@ -194,7 +199,7 @@ def main():
         "status": "running",
         "dataset": {
             "dataset_id": dataset_id,
-            "filename": os.path.basename(dataset_path),
+            "filename": dataset_display_name,
             "num_events": dataset_meta.get("num_events"),
             "num_cases": dataset_meta.get("num_cases"),
         },
@@ -228,20 +233,26 @@ def main():
                     val_split,
                     config,
                     explainability_method=explainability,
+                    explainability_config=explainability_config,
                     target_column=target_column if task == "custom_activity" else None,
                     skip_auto_mapping=skip_auto_mapping,
+                    dataset_display_name=dataset_display_name,
                 )
             elif task == "event_time":
                 metrics = run_event_time_prediction(
                     dataset_path, artifacts_dir, test_size, val_split, config,
                     explainability_method=explainability,
+                    explainability_config=explainability_config,
                     skip_auto_mapping=skip_auto_mapping,
+                    dataset_display_name=dataset_display_name,
                 )
             elif task == "remaining_time":
                 metrics = run_remaining_time_prediction(
                     dataset_path, artifacts_dir, test_size, val_split, config,
                     explainability_method=explainability,
+                    explainability_config=explainability_config,
                     skip_auto_mapping=skip_auto_mapping,
+                    dataset_display_name=dataset_display_name,
                 )
             else:
                 raise RuntimeError(f"Unsupported transformer task: {task}")
@@ -258,9 +269,11 @@ def main():
                 val_split,
                 config,
                 explainability_method=explainability,
+                explainability_config=explainability_config,
                 task=gnn_task,
                 target_column=target_column if task == "custom_activity" else None,
                 skip_auto_mapping=skip_auto_mapping,
+                dataset_display_name=dataset_display_name,
             )
         else:
             raise RuntimeError(f"Unsupported model_type: {model_type}")
@@ -283,7 +296,7 @@ def main():
             "status": "succeeded",
             "dataset": {
                 "dataset_id": dataset_id,
-                "filename": os.path.basename(dataset_path),
+                "filename": dataset_display_name,
                 "num_events": dataset_meta.get("num_events"),
                 "num_cases": dataset_meta.get("num_cases"),
             },
@@ -303,7 +316,7 @@ def main():
             "status": "failed",
             "dataset": {
                 "dataset_id": dataset_id,
-                "filename": os.path.basename(dataset_path),
+                "filename": dataset_display_name,
                 "num_events": dataset_meta.get("num_events"),
                 "num_cases": dataset_meta.get("num_cases"),
             },

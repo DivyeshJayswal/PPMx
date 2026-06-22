@@ -1,6 +1,15 @@
 import os
 import re
+import json
+import textwrap
 import numpy as np
+
+try:
+    import graphviz as _graphviz
+    _GRAPHVIZ_AVAILABLE = True
+except ImportError:
+    _graphviz = None
+    _GRAPHVIZ_AVAILABLE = False
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -61,15 +70,19 @@ class ExplainabilityConfig:
     MODEL_TYPE = 'auto'
 
 class SHAPExplainer:
-    def __init__(self, model, task='activity', label_encoder=None, scaler=None):
+    def __init__(self, model, task='activity', label_encoder=None, scaler=None, random_seed=42):
         self.model = model
         self.task = task
         self.label_encoder = label_encoder
         self.scaler = scaler
+        self.random_seed = int(random_seed)
+        self.rng = np.random.default_rng(self.random_seed)
         self.explainer = None
         self.shap_values = None
         self.test_data = None
         self.test_data_temp = None
+        self.selected_sample_indices = None
+        self.background_indices = None
         self.background_temp = None
         self.is_multi_input = False
         self.max_evals = None
@@ -99,6 +112,34 @@ class SHAPExplainer:
             else:
                 names.append('[PAD]')
         return names
+
+    def _target_indices_for_test_data(self):
+        if self.task != 'activity' or self.test_data is None:
+            return None
+        try:
+            if self.is_multi_input and self.test_data_temp is not None:
+                preds = self.model.predict([self.test_data, self.test_data_temp], verbose=0)
+            else:
+                preds = self.model.predict(self.test_data, verbose=0)
+            preds = _primary_prediction_output(preds)
+            if preds.ndim < 2:
+                return None
+            return np.argmax(preds, axis=1).astype(int)
+        except Exception as e:
+            print(f"[WARNING] Could not compute SHAP target classes: {e}")
+            return None
+
+    def _select_target_output_values(self, values):
+        values = np.asarray(values)
+        if self.task != 'activity' or values.ndim < 3:
+            return values
+        target_indices = self._target_indices_for_test_data()
+        if target_indices is None or values.shape[0] != len(target_indices):
+            return values
+        if values.shape[-1] <= int(np.max(target_indices)):
+            return values
+        selector = (np.arange(values.shape[0]),) + (slice(None),) * (values.ndim - 2) + (target_indices,)
+        return values[selector]
 
     def _aggregate_feature_names(self, data):
         if self.label_encoder is None:
@@ -131,7 +172,9 @@ class SHAPExplainer:
             self.is_multi_input = True
             bg_seq = background_data[0]
             bg_temp = background_data[1]
-            indices = np.random.choice(len(bg_seq), min(max_background, len(bg_seq)), replace=False)
+            indices = self.rng.choice(len(bg_seq), min(max_background, len(bg_seq)), replace=False)
+            indices = np.asarray(indices, dtype=int)
+            self.background_indices = indices.tolist()
             background_seq_sample = bg_seq[indices]
             background_temp_sample = bg_temp[indices]
             self.background_temp = np.mean(bg_temp, axis=0).reshape(1, -1)
@@ -193,7 +236,9 @@ class SHAPExplainer:
                     background_flat,
                 )
         else:
-            indices = np.random.choice(len(background_data), min(max_background, len(background_data)), replace=False)
+            indices = self.rng.choice(len(background_data), min(max_background, len(background_data)), replace=False)
+            indices = np.asarray(indices, dtype=int)
+            self.background_indices = indices.tolist()
             background_sample = background_data[indices]
             num_features = int(np.prod(background_sample.shape[1:]))
             
@@ -268,6 +313,7 @@ class SHAPExplainer:
             return self.explainer(inputs)
 
     def explain_samples(self, test_data, num_samples=20, indices=None):
+        self.selected_sample_indices = [int(idx) for idx in indices] if indices is not None and len(indices) > 0 else list(range(num_samples))
         if isinstance(test_data, (list, tuple)):
             if indices is not None and len(indices) > 0:
                 test_sample = test_data[0][indices]
@@ -325,6 +371,7 @@ class SHAPExplainer:
         values = self.shap_values.values
         if isinstance(values, list):
             values = values[0]
+        values = self._select_target_output_values(values)
         
         seq_len = self.test_data.shape[1] if self.test_data is not None else None
         if seq_len is None:
@@ -357,10 +404,7 @@ class SHAPExplainer:
         values = np.moveaxis(values, seq_axis, 1)
         
         if values.ndim > 2:
-            if self.task == 'activity':
-                values = np.abs(values).mean(axis=tuple(range(2, values.ndim)))
-            else:
-                values = values.mean(axis=tuple(range(2, values.ndim)))
+            values = values.mean(axis=tuple(range(2, values.ndim)))
         
         # Collect all unique activity names across all samples
         unique_names = set()
@@ -437,8 +481,8 @@ class SHAPExplainer:
 
 class TimestepSHAPExplainer(SHAPExplainer):
     """SHAP Explainer with timestep-level attribution (optional timestamps)."""
-    def __init__(self, model, task='time', label_encoder=None, scaler=None, timestamps=None):
-        super().__init__(model, task, label_encoder, scaler)
+    def __init__(self, model, task='time', label_encoder=None, scaler=None, timestamps=None, random_seed=42):
+        super().__init__(model, task, label_encoder, scaler, random_seed=random_seed)
         self.model_has_timestep_outputs = self._detect_model_type()
         self.timestamps = timestamps
 
@@ -468,6 +512,7 @@ class TimestepSHAPExplainer(SHAPExplainer):
         values = self.shap_values.values
         if isinstance(values, list):
             values = values[0]
+        values = self._select_target_output_values(values)
 
         seq_len = self.test_data.shape[1]
 
@@ -494,6 +539,24 @@ class TimestepSHAPExplainer(SHAPExplainer):
 
         return values
 
+    def _original_sample_index(self, sample_idx):
+        if self.selected_sample_indices is not None and sample_idx < len(self.selected_sample_indices):
+            return int(self.selected_sample_indices[sample_idx])
+        return int(sample_idx)
+
+    def _timestamps_for_sample(self, sample_idx):
+        if self.timestamps is None:
+            return None
+        original_idx = self._original_sample_index(sample_idx)
+        if 0 <= original_idx < len(self.timestamps):
+            return self.timestamps[original_idx]
+        return None
+
+    def _temp_features_for_sample(self, sample_idx):
+        if self.test_data_temp is not None and sample_idx < len(self.test_data_temp):
+            return self.test_data_temp[sample_idx].reshape(1, -1)
+        return self.background_temp if self.background_temp is not None else np.zeros((1, 3))
+
     def plot_temporal_evolution(self, output_dir, sample_idx=0, show_prediction=True):
         if self.shap_values is None:
             print("No SHAP values computed. Run explain_samples() first.")
@@ -514,8 +577,8 @@ class TimestepSHAPExplainer(SHAPExplainer):
         filtered_shap = sample_shap[non_pad_mask]
         filtered_activities = [name for name, is_valid in zip(activity_names, non_pad_mask) if is_valid]
 
-        if self.timestamps is not None and sample_idx < len(self.timestamps):
-            sample_timestamps = self.timestamps[sample_idx]
+        sample_timestamps = self._timestamps_for_sample(sample_idx)
+        if sample_timestamps is not None:
             filtered_timestamps = [sample_timestamps[i] for i, valid in enumerate(non_pad_mask) if valid]
             x_values = np.arange(len(filtered_timestamps))
             x_labels = filtered_timestamps
@@ -561,7 +624,7 @@ class TimestepSHAPExplainer(SHAPExplainer):
 
         if show_prediction and self.model_has_timestep_outputs:
             try:
-                temp_input = self.background_temp if self.background_temp is not None else np.zeros((1, 3))
+                temp_input = self._temp_features_for_sample(sample_idx)
                 outputs = self.model.predict([sample_sequence.reshape(1, -1), temp_input], verbose=0)
                 if isinstance(outputs, list) and len(outputs) > 1:
                     timestep_preds = outputs[1][0]
@@ -593,6 +656,80 @@ class TimestepSHAPExplainer(SHAPExplainer):
         df = pd.DataFrame(df_data)
         df.to_csv(os.path.join(output_dir, f'shap_timestep_data_sample_{sample_idx}.csv'), index=False)
 
+    def plot_shap_observed_contribution(self, output_dir, sample_idx=0):
+        """Dual-axis plot: SHAP bars (left Y) vs fvt1 inter-event gap (right Y) over real time (X)."""
+        if self.shap_values is None:
+            print(f"[SHAP] No SHAP values for sample {sample_idx}. Skipping.")
+            return
+
+        seq_values = self._sequence_shap_values()
+        if seq_values is None or sample_idx >= len(seq_values):
+            return
+
+        sample_shap = seq_values[sample_idx]
+        sample_sequence = self.test_data[sample_idx]
+        non_pad_mask = sample_sequence > 0
+
+        sample_timestamps = self._timestamps_for_sample(sample_idx)
+        if sample_timestamps is None:
+            print(f"[SHAP] No timestamps for sample {sample_idx}. Skipping observed-contribution plot.")
+            return
+
+        filtered_timestamps = np.array([sample_timestamps[i] for i, v in enumerate(non_pad_mask) if v], dtype=float)
+        filtered_shap = sample_shap[non_pad_mask]
+
+        if len(filtered_timestamps) == 0:
+            return
+
+        # fvt1: inter-event gap derived from the timestamp sequence
+        fvt1 = np.zeros(len(filtered_timestamps))
+        if len(filtered_timestamps) > 1:
+            fvt1[1:] = np.diff(filtered_timestamps)
+
+        x = filtered_timestamps  # actual elapsed days — X axis positions
+
+        # Bar width: 60% of the smallest inter-event gap; fallback for single-event or zero-gap cases
+        if len(x) > 1:
+            gaps = np.diff(x)
+            nonzero_gaps = gaps[gaps > 0]
+            bar_width = float(nonzero_gaps.min() * 0.6) if len(nonzero_gaps) else float((x[-1] - x[0]) / max(len(x), 1) * 0.6)
+        else:
+            bar_width = 0.1
+
+        positive_shap = np.where(filtered_shap > 0, filtered_shap, 0)
+        negative_shap = np.where(filtered_shap < 0, filtered_shap, 0)
+
+        fig, ax1 = plt.subplots(figsize=(16, 6), facecolor='white')
+        ax2 = ax1.twinx()
+
+        ax1.bar(x, positive_shap, width=bar_width, color='red',  alpha=0.85, label='Positive Shapley values')
+        ax1.bar(x, negative_shap, width=bar_width, color='blue', alpha=0.85, label='Negative Shapley values')
+        ax1.axhline(0, color='black', linewidth=0.8, linestyle='-')
+
+        ax2.plot(x, fvt1, color='black', linewidth=1.5, marker='o', markersize=4, label='Observed data (fvt1)')
+
+        ax1.set_xlim(left=0, right=max(float(x[-1]) * 1.05, 0.1))
+        ax1.set_xlabel('Time (Days from Case Start)', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Shapley values', fontsize=12, fontweight='bold')
+        ax2.set_ylabel('Observed data values\n(fvt1 — inter-event gap, days)', fontsize=11, fontweight='bold')
+
+        ax1.grid(axis='y', linestyle='--', alpha=0.3)
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=10)
+
+        plt.title(f'Observed values and contribution scores (Sample {sample_idx})', fontsize=13, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'shap_observed_contribution_sample_{sample_idx}.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+
+        pd.DataFrame({
+            'Elapsed_Time_Days': x,
+            'SHAP_Value': filtered_shap,
+            'fvt1_Gap_Days': fvt1,
+        }).to_csv(os.path.join(output_dir, f'shap_observed_contribution_sample_{sample_idx}.csv'), index=False)
+
     def plot_timestep_heatmap(self, output_dir, sample_idx=0):
         if self.shap_values is None:
             return
@@ -612,8 +749,8 @@ class TimestepSHAPExplainer(SHAPExplainer):
         filtered_activities = [name for name, is_valid in zip(activity_names, non_pad_mask) if is_valid]
         timesteps = np.arange(len(filtered_shap))
 
-        if self.timestamps is not None and sample_idx < len(self.timestamps):
-            sample_timestamps = self.timestamps[sample_idx]
+        sample_timestamps = self._timestamps_for_sample(sample_idx)
+        if sample_timestamps is not None:
             filtered_timestamps = [sample_timestamps[i] for i, valid in enumerate(non_pad_mask) if valid]
             x_labels = [f"{act}\n{ts}" for act, ts in zip(filtered_activities, filtered_timestamps)]
         else:
@@ -627,7 +764,7 @@ class TimestepSHAPExplainer(SHAPExplainer):
         ax.set_xticks(timesteps)
         ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
         ax.axhline(0, color='black', linewidth=1)
-        ax.set_xlabel('Event (Activity + Timestamp)' if self.timestamps else 'Timestep (Activity)',
+        ax.set_xlabel('Event (Activity + Timestamp)' if sample_timestamps is not None else 'Timestep (Activity)',
                       fontsize=12, fontweight='bold')
         ax.set_ylabel('SHAP Value (Contribution)', fontsize=12, fontweight='bold')
         ax.set_title(f'Timestep-Level SHAP Attribution - Sample {sample_idx}',
@@ -722,30 +859,43 @@ class LIMEExplainer:
             print(f"[OK] label_encoder available with {len(self.label_encoder.classes_)} activities")
         
     def _aggregate_feature_names(self, data):
-        if self.label_encoder is None:
-            return [f'Position_{i+1}' for i in range(data.shape[1])]
-        feature_names = []
-        for pos in range(data.shape[1]):
-            activities_at_pos = []
-            for sample in data:
-                token = sample[pos]
-                if token > 0:
-                    try:
-                        # Token indices are offset by +1 (0 is padding)
-                        activity = self.label_encoder.inverse_transform([int(token) - 1])[0]
-                        activities_at_pos.append(activity)
-                    except Exception as e:
-                        print(f"[WARNING] Failed to decode activity token {int(token)}: {e}")
-                        pass
-    
-            if activities_at_pos:
-                # Find most common activity at this position
-                most_common = max(set(activities_at_pos), key=activities_at_pos.count)
-                feature_names.append(most_common)
-            else:
-                # Fallback for padding-only positions
-                feature_names.append(f'Position_{pos+1}')
-        return feature_names
+        return [f'Position_{i+1}' for i in range(data.shape[1])]
+
+    def _categorical_names(self):
+        names = []
+        for token in range(max(int(self.vocab_size or 1), 1)):
+            names.append(self._get_activity_name(token))
+        return names
+
+    def _valid_activity_probabilities(self, preds):
+        preds = np.asarray(preds)
+        if self.task != 'activity' or self.label_encoder is None or preds.ndim != 2:
+            return preds
+
+        class_count = len(self.label_encoder.classes_)
+        if preds.shape[1] <= class_count + 1:
+            return preds
+
+        cleaned = preds.copy()
+        cleaned[:, 0] = 0.0
+        cleaned[:, class_count + 1:] = 0.0
+        row_sums = cleaned.sum(axis=1, keepdims=True)
+        nonzero = row_sums.reshape(-1) > 0
+        cleaned[nonzero] = cleaned[nonzero] / row_sums[nonzero]
+        return cleaned
+
+    def _explanation_feature_weights(self, exp, label=None):
+        local_exp = getattr(exp, "local_exp", None)
+        if isinstance(local_exp, dict) and local_exp:
+            key = label if label in local_exp else next(iter(local_exp.keys()))
+            return [(int(feature_idx), float(weight)) for feature_idx, weight in local_exp.get(key, [])]
+
+        fallback = []
+        for rule, weight in exp.as_list(label=label) if label is not None else exp.as_list():
+            match = re.search(r'Position_(\d+)', str(rule))
+            if match:
+                fallback.append((int(match.group(1)) - 1, float(weight)))
+        return fallback
         
     def initialize_explainer(self, training_data, num_classes=None):
         print("Initializing LIME Explainer...")
@@ -760,15 +910,17 @@ class LIMEExplainer:
             else:
                 self.vocab_size = int(np.max(init_data)) + 1 if init_data.size > 0 else 1
         
-        # Aggregate feature names based on actual activities
         feature_names = self._aggregate_feature_names(init_data)
+        categorical_features = list(range(init_data.shape[1]))
+        token_names = self._categorical_names()
+        categorical_names = {idx: token_names for idx in categorical_features}
         class_names = None
         mode = 'regression'
         
         if self.task == 'activity':
             mode = 'classification'
             if self.label_encoder:
-                class_names = self.label_encoder.classes_.tolist()
+                class_names = [self._get_activity_name(idx) for idx in range(int(self.vocab_size or 0))]
             elif num_classes:
                 class_names = [str(i) for i in range(num_classes)]
                 
@@ -777,6 +929,8 @@ class LIMEExplainer:
             mode=mode,
             feature_names=feature_names,
             class_names=class_names,
+            categorical_features=categorical_features,
+            categorical_names=categorical_names,
             discretize_continuous=False,
             verbose=False
         )
@@ -808,6 +962,7 @@ class LIMEExplainer:
                         temp_batch = np.repeat(current_temp, x_seq.shape[0], axis=0)
                         preds = self.model.predict([x_seq, temp_batch], verbose=0)
                         preds = _primary_prediction_output(preds)
+                        preds = self._valid_activity_probabilities(preds)
                         return preds.reshape(-1) if self.task != 'activity' else preds
                 else:
                     def predict_fn(x_seq):
@@ -815,13 +970,18 @@ class LIMEExplainer:
                         x_seq = np.clip(np.round(x_seq), 0, vocab_size-1).astype(int)
                         preds = self.model.predict(x_seq, verbose=0)
                         preds = _primary_prediction_output(preds)
+                        preds = self._valid_activity_probabilities(preds)
                         return preds.reshape(-1) if self.task != 'activity' else preds
 
+                explain_kwargs = {
+                    "num_features": num_features,
+                }
+                if self.task == 'activity':
+                    explain_kwargs["top_labels"] = 1
                 exp = self.explainer.explain_instance(
                     self.test_data_seq[i],
                     predict_fn,
-                    num_features=num_features,
-                    top_labels=1
+                    **explain_kwargs
                 )
                 self.explanations.append(exp)
                 
@@ -831,28 +991,197 @@ class LIMEExplainer:
         return self.explanations
 
     def _get_activity_name(self, token_idx):
-        if token_idx == 0: 
+        token_idx = int(token_idx)
+        if token_idx == 0:
             return "[PAD]"
         if self.label_encoder:
-            try: 
-                return self.label_encoder.inverse_transform([int(token_idx)-1])[0]
-            except Exception as e:
-                print(f"[WARNING] Failed to decode activity token {int(token_idx)}: {e}")
-                pass
-        return f"Activity_{int(token_idx)}"
+            class_count = len(self.label_encoder.classes_)
+            if 1 <= token_idx <= class_count:
+                try:
+                    return self.label_encoder.inverse_transform([token_idx - 1])[0]
+                except Exception as e:
+                    print(f"[WARNING] Failed to decode activity token {token_idx}: {e}")
+            return f"[UNUSED_{token_idx}]"
+        return f"Activity_{token_idx}"
+
+    def _wrap_label(self, value, width=48):
+        text = str(value)
+        return "\n".join(textwrap.wrap(text, width=width, break_long_words=False)) or text
+
+    def _build_lime_dfg_image(self, trace_activities, weight_by_activity,
+                               csv_prediction, csv_confidence, csv_ground_truth, display_idx):
+        """Build a per-case DFG with graphviz (unique activities as nodes, direct
+        succession as edges) and return a numpy image array. Returns None on failure."""
+        if not _GRAPHVIZ_AVAILABLE or not trace_activities:
+            return None
+
+        # DFG structures: unique node occurrence counts + direct succession edge counts
+        node_counts = {}
+        for act in trace_activities:
+            node_counts[act] = node_counts.get(act, 0) + 1
+
+        edge_counts = {}
+        for i in range(len(trace_activities) - 1):
+            key = (trace_activities[i], trace_activities[i + 1])
+            edge_counts[key] = edge_counts.get(key, 0) + 1
+
+        # Collision-free graphviz node IDs
+        used_ids: set = set()
+        node_ids: dict = {}
+        for act in node_counts:
+            base = "".join(ch if ch.isalnum() else "_" for ch in str(act)) or "node"
+            cand, k = base, 1
+            while cand in used_ids:
+                cand, k = f"{base}_{k}", k + 1
+            used_ids.add(cand)
+            node_ids[act] = cand
+
+        def _esc(v):
+            return (str(v).replace("&", "&amp;").replace("<", "&lt;")
+                    .replace(">", "&gt;").replace("\n", "&#10;"))
+
+        dot = _graphviz.Digraph(comment="LIME DFG")
+        dot.attr(
+            rankdir="LR", splines="spline",
+            nodesep="0.55", ranksep="0.9",
+            pad="0.35", dpi="160", bgcolor="white",
+        )
+
+        # Graph title — only sample identifier, prediction details go into the output node
+        dot.attr(
+            label=f"Local DFG Trace — Sample {display_idx}",
+            labelloc="t",
+            fontsize="22", fontname="Helvetica", fontcolor="#0f172a",
+        )
+        dot.attr("node", fontname="Helvetica", fontsize="11")
+        dot.attr("edge", fontname="Helvetica", fontsize="10",
+                 color="#0891b2", arrowsize="0.9")
+
+        def _node_label(act, weight, count):
+            fill   = "#dcfce7" if weight >  0.005 else "#fee2e2" if weight < -0.005 else "#f1f5f9"
+            border = "#16a34a" if weight >  0.005 else "#dc2626" if weight < -0.005 else "#94a3b8"
+            short  = _esc(act[:24] + "…") if len(act) > 24 else _esc(act)
+            sign   = "+" if weight >= 0 else ""
+            return (
+                f'<<TABLE BORDER="2" CELLBORDER="0" CELLSPACING="3" CELLPADDING="6" '
+                f'BGCOLOR="{fill}" COLOR="{border}">'
+                f'<TR><TD><B><FONT POINT-SIZE="13" COLOR="#0f172a">{short}</FONT></B></TD></TR>'
+                f'<TR><TD><FONT POINT-SIZE="10" COLOR="#374151">'
+                f'LIME: {sign}{weight:.3f}  ×{count}</FONT></TD></TR>'
+                f'</TABLE>>'
+            )
+
+        for act, count in node_counts.items():
+            weight = weight_by_activity.get(act, 0.0)
+            dot.node(node_ids[act], label=_node_label(act, weight, count), shape="plain")
+
+        for (src, dst), count in edge_counts.items():
+            lbl = f"×{count}" if count > 1 else ""
+            dot.edge(node_ids[src], node_ids[dst],
+                     label=lbl, color="#0891b2", penwidth="2.0", fontcolor="#374151")
+
+        # ── Model Output node (GNN-style: clear Predicted / Ground Truth / Confidence table) ──
+        def _output_node_label():
+            pred_esc = _esc(csv_prediction) if csv_prediction is not None else "N/A"
+            gt_esc   = _esc(csv_ground_truth) if csv_ground_truth is not None else "N/A"
+            if self.task == "activity":
+                conf_str = f"{float(csv_confidence):.3f}" if csv_confidence is not None else "N/A"
+                return f'''<<TABLE BORDER="1" COLOR="#64748b" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" BGCOLOR="white">
+            <TR>
+                <TD BGCOLOR="#f8fafc" COLSPAN="2">
+                    <FONT POINT-SIZE="14" COLOR="#475569"><B>Model Output</B></FONT>
+                </TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#dbeafe"><FONT POINT-SIZE="12" COLOR="#1d4ed8"><B>Predicted next</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{pred_esc}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#f8fafc"><FONT POINT-SIZE="12" COLOR="#475569"><B>Ground truth</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{gt_esc}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#eff6ff"><FONT POINT-SIZE="12" COLOR="#1d4ed8"><B>Confidence</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827">{conf_str}</FONT></TD>
+            </TR>
+        </TABLE>>'''
+            else:
+                pred_str = f"{float(csv_prediction):.3f}" if csv_prediction is not None else "N/A"
+                gt_str   = f"{float(csv_ground_truth):.3f}" if csv_ground_truth is not None else "N/A"
+                task_label = "Remaining Time Prediction" if "remaining" in self.task else "Event Time Prediction"
+                pred_label = "Predicted remaining time" if "remaining" in self.task else "Predicted event time"
+                actual_label = "Actual remaining time" if "remaining" in self.task else "Actual event time"
+                return f'''<<TABLE BORDER="1" COLOR="#64748b" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" BGCOLOR="white">
+            <TR>
+                <TD BGCOLOR="#f8fafc" COLSPAN="2">
+                    <FONT POINT-SIZE="14" COLOR="#475569"><B>Model Output</B></FONT>
+                </TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#f8fafc"><FONT POINT-SIZE="12" COLOR="#475569"><B>Task</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{_esc(task_label)}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#dbeafe"><FONT POINT-SIZE="12" COLOR="#1d4ed8"><B>{_esc(pred_label)}</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{pred_str}</B></FONT></TD>
+            </TR>
+            <TR>
+                <TD BGCOLOR="#f8fafc"><FONT POINT-SIZE="12" COLOR="#475569"><B>{_esc(actual_label)}</B></FONT></TD>
+                <TD><FONT POINT-SIZE="12" COLOR="#111827"><B>{gt_str}</B></FONT></TD>
+            </TR>
+        </TABLE>>'''
+
+        dot.node("model_output", label=_output_node_label(), shape="plain")
+
+        # Dashed edge from the last activity in the trace to the output node
+        last_act = trace_activities[-1]
+        if last_act in node_ids:
+            edge_label = "predict next activity" if self.task == "activity" else "predict time"
+            dot.edge(
+                node_ids[last_act], "model_output",
+                label=edge_label,
+                color="#1d4ed8", style="dashed", penwidth="2.0",
+                fontcolor="#1d4ed8", constraint="true",
+            )
+
+        import tempfile
+        tmp_base = os.path.join(
+            tempfile.gettempdir(),
+            f"_lime_dfg_{display_idx}_{os.getpid()}"
+        )
+        try:
+            dot.render(tmp_base, format="png", cleanup=True)
+            img = plt.imread(tmp_base + ".png")
+            return img
+        except Exception as e:
+            print(f"[WARNING] graphviz DFG render failed: {e}")
+            return None
+        finally:
+            for f in [tmp_base, tmp_base + ".png"]:
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
 
     def plot_explanation(self, output_dir, sample_idx=0, original_idx=None):
         if sample_idx >= len(self.explanations) or self.explanations[sample_idx] is None:
             print(f"LIME Explanation not found for sample {sample_idx}.")
             return
     
+        os.makedirs(output_dir, exist_ok=True)
         # Use original_idx for filename, sample_idx for data access
         display_idx = original_idx if original_idx is not None else sample_idx 
         print(f"Generating LIME Plot for sample {display_idx}...")
         exp = self.explanations[sample_idx]
         current_seq = self.test_data_seq[sample_idx]  # Use local index
         
-        pred_activity_name = None
+        prediction_summary = None
+        csv_prediction = None
+        csv_confidence = None
+        csv_ground_truth = None
+        label_to_explain = None
+        pred_probs = None
         try:
             if self.task == 'activity':
                 if hasattr(exp, 'top_labels') and exp.top_labels:
@@ -871,115 +1200,197 @@ class LIMEExplainer:
                 pred_label = label_to_explain
                 if self.label_encoder is not None:
                     try:
-                        pred_label = self.label_encoder.inverse_transform([int(label_to_explain)])[0]
+                        pred_label = self._get_activity_name(label_to_explain)
                     except Exception:
                         pred_label = label_to_explain
-                pred_activity_name = pred_label
                 gt_label = None
                 if self.y_true is not None and sample_idx < len(self.y_true):
                     gt_label = self.y_true[sample_idx]
                     if self.label_encoder is not None:
                         try:
-                            gt_label = self.label_encoder.inverse_transform([int(gt_label)])[0]
+                            gt_label = self._get_activity_name(gt_label)
                         except Exception:
                             pass
-                gt_text = f" | Ground Truth: {gt_label}" if gt_label is not None else ""
-                title = f"LIME Explanation (Sample {display_idx})\nPredicted Class: {pred_label} | Confidence: {confidence:.2f}{gt_text}"
-                lime_list = exp.as_list(label=label_to_explain)
+                csv_prediction = pred_label
+                csv_confidence = confidence
+                csv_ground_truth = gt_label
+                prediction_summary = f"Predicted: {pred_label} | Confidence: {confidence:.2f}"
+                if gt_label is not None:
+                    prediction_summary += f" | Ground Truth: {gt_label}"
+                title = f"LIME Sequence Explanation (Sample {display_idx})"
+                feature_weights = self._explanation_feature_weights(exp, label=label_to_explain)
             else:
                 display_val = _to_scalar(getattr(exp, 'predicted_value', None))
                 gt_val = None
                 if self.y_true is not None and sample_idx < len(self.y_true):
                     gt_val = _to_scalar(self.y_true[sample_idx], default=None)
-                gt_text = f" | Ground Truth: {gt_val:.2f}" if gt_val is not None else ""
-                title = f"LIME Explanation (Sample {display_idx})\nPredicted Value: {display_val:.2f}{gt_text}"
-                lime_list = exp.as_list()
+                csv_prediction = display_val
+                csv_ground_truth = gt_val
+                prediction_summary = f"Predicted value: {display_val:.2f}"
+                if gt_val is not None:
+                    prediction_summary += f" | Ground Truth: {gt_val:.2f}"
+                title = f"LIME Sequence Explanation (Sample {display_idx})"
+                feature_weights = self._explanation_feature_weights(exp)
                 
         except Exception as e:
             print(f"Warning: Could not extract full LIME details: {e}")
-            title = f"LIME Explanation (Sample {display_idx})"
-            lime_list = exp.as_list()
-
-        activity_stats = {} 
-        for rule, weight in lime_list:
-            # Try to extract activity name from rule
-            # Rules can be: "Create Order <= 3.00" or just "Create Order"
-            if rule.startswith('Position_'):
-                # Old-style Position_N label - extract position and map to activity
-                match = re.search(r'Position_(\d+)', rule)
-                if match:
-                    pos = int(match.group(1)) - 1
-                    if 0 <= pos < len(current_seq):
-                        name = self._get_activity_name(current_seq[pos])
-                    else:
-                        continue
-                else:
-                    continue
-            else:
-                # Activity name from aggregated feature_names
-                # Extract base name (remove conditions like "<= 3.00")
-                name = rule.split('<=')[0].split('>')[0].strip()
-                # If name still looks like a Position_ label, try mapping or skip.
-                if name.startswith("Position_"):
-                    match = re.search(r'Position_(\d+)', name)
-                    if match:
-                        pos = int(match.group(1)) - 1
-                        if 0 <= pos < len(current_seq):
-                            name = self._get_activity_name(current_seq[pos])
-                        else:
-                            continue
-                    else:
-                        continue
-            
-            if name not in activity_stats:
-                activity_stats[name] = {'weight': 0.0, 'count': 0}
-            activity_stats[name]['weight'] += weight
-            activity_stats[name]['count'] += 1
+            title = f"LIME Sequence Explanation (Sample {display_idx})"
+            prediction_summary = "Prediction details unavailable"
+            feature_weights = self._explanation_feature_weights(exp)
         
+        weight_by_position = {}
+        for feature_idx, weight in feature_weights:
+            if 0 <= feature_idx < len(current_seq):
+                weight_by_position[feature_idx] = weight_by_position.get(feature_idx, 0.0) + float(weight)
+
         data = []
-        for name, stats in activity_stats.items():
-            label = f"{name} (x{stats['count']})" if stats['count'] > 1 else name
+        for feature_idx, token in enumerate(current_seq):
+            if int(token) == 0:
+                continue
+            weight = weight_by_position.get(feature_idx, 0.0)
+            activity_name = self._get_activity_name(current_seq[feature_idx])
             data.append({
-                'Activity': label,
-                'Weight': stats['weight'],
-                'AbsWeight': abs(stats['weight'])
+                'Activity': activity_name,
+                'Position': feature_idx + 1,
+                'Token': int(token),
+                'Weight': float(weight),
+                'AbsWeight': abs(float(weight)),
+                'Direction': 'Supports prediction' if weight > 0 else 'Contradicts prediction' if weight < 0 else 'No LIME weight',
+                'Predicted': csv_prediction,
+                'Confidence': csv_confidence,
+                'Ground_Truth': csv_ground_truth,
             })
             
         if not data:
             print("No valid LIME features found to plot.")
             return
 
-        df = pd.DataFrame(data).sort_values('AbsWeight', ascending=True)
-        df[['Activity', 'Weight']].to_csv(os.path.join(output_dir, f'lime_explanation_sample_{display_idx}.csv'), index=False)
+        df = pd.DataFrame(data).sort_values('Position', ascending=True)
+        csv_columns = [
+            'Position', 'Activity', 'Token', 'Weight', 'Direction',
+            'Predicted', 'Confidence', 'Ground_Truth'
+        ]
+        df[csv_columns].to_csv(os.path.join(output_dir, f'lime_explanation_sample_{display_idx}.csv'), index=False)
 
-        plt.figure(figsize=(10, 6))
-        colors = ['#2ca02c' if x > 0 else '#d62728' for x in df['Weight']]
-        
-        bars = plt.barh(df['Activity'], df['Weight'], color=colors, height=0.6)
-        
-        plt.axvline(0, color='black', linewidth=0.8)
-        plt.grid(axis='x', linestyle='--', alpha=0.6)
-        plt.margins(x=0.15)
-        plt.title(title, fontsize=13, fontweight='bold')
-        plt.xlabel("Contribution to Prediction", fontsize=11)
-        
-        for rect in bars:
-            w = rect.get_width()
-            y = rect.get_y() + rect.get_height()/2
-            padding = 0.0005 if w > 0 else -0.0005
-            ha = 'left' if w > 0 else 'right'
-            plt.text(w + padding, y, f'{w:.4f}', va='center', ha=ha, fontsize=9, fontweight='bold')
+        # Paper-style LIME plots: local contribution bar chart and prediction plot.
+        top_df = df[df["AbsWeight"] > 0].sort_values("AbsWeight", ascending=False).head(12)
+        if top_df.empty:
+            top_df = df.sort_values("Position", ascending=True).head(12)
+        top_df = top_df.copy()
+        top_df["Feature_Label"] = top_df.apply(
+            lambda row: str(row.Activity),
+            axis=1,
+        )
 
-        from matplotlib.patches import Patch
-        plt.legend(handles=[
-            Patch(facecolor='#2ca02c', label='Supports'),
-            Patch(facecolor='#d62728', label='Contradicts')
-        ], loc='lower right', frameon=True)
+        # Build per-case DFG using graphviz (unique activities = nodes, direct succession = edges)
+        trace_activities = df.sort_values('Position')['Activity'].tolist()
+        weight_by_activity = df.groupby('Activity')['Weight'].mean().to_dict()
+        dfg_img = self._build_lime_dfg_image(
+            trace_activities, weight_by_activity,
+            csv_prediction, csv_confidence, csv_ground_truth, display_idx,
+        )
 
-        # Add full sample sequence at the bottom with predicted activity highlighted.
-        plt.tight_layout(rect=[0.05, 0.05, 0.98, 1])
-        plt.savefig(os.path.join(output_dir, f'lime_explanation_sample_{display_idx}.png'), dpi=300)
-        plt.close()
+        if self.task == "activity":
+            bar_title = "Local explanation for predicted class"
+        else:
+            bar_title = "Local explanation for predicted value"
+
+        bar_plot_df = top_df.iloc[::-1]
+        bar_colors = ["green" if w >= 0 else "red" for w in bar_plot_df["Weight"]]
+        n_bars = len(bar_plot_df)
+        H_BAR = max(4.0, 0.5 * n_bars + 1.5)
+
+        if dfg_img is not None:
+            # ── 2-panel figure: graphviz DFG on top, LIME bars below ──────────
+            dfg_h, dfg_w = dfg_img.shape[:2]
+            H_DFG = max(3.0, round(12.0 * dfg_h / dfg_w, 1))
+
+            fig = plt.figure(figsize=(12, H_DFG + H_BAR + 0.4), facecolor="white")
+            gs = fig.add_gridspec(2, 1, height_ratios=[H_DFG, H_BAR], hspace=0.35)
+
+            ax_dfg = fig.add_subplot(gs[0])
+            ax_dfg.imshow(dfg_img, aspect="auto")
+            ax_dfg.set_axis_off()
+
+            ax_bar = fig.add_subplot(gs[1])
+        else:
+            # ── Fallback (graphviz unavailable): matplotlib trace + info header ─
+            n_trace_rows = max(1, (len(trace_activities) - 1) // 8 + 1)
+            H_TRACE = max(1.6, n_trace_rows * 1.1)
+            H_INFO = 1.8
+
+            fig = plt.figure(figsize=(12, H_INFO + H_TRACE + H_BAR), facecolor="white")
+            gs = fig.add_gridspec(3, 1,
+                                  height_ratios=[H_INFO, H_TRACE, H_BAR], hspace=0.4)
+
+            ax_info = fig.add_subplot(gs[0])
+            ax_info.set_facecolor("#f0f4ff")
+            ax_info.set_axis_off()
+            ax_info.text(0.5, 0.88, f"Sample {display_idx} — LIME Explainability Report",
+                         transform=ax_info.transAxes, ha="center", va="top",
+                         fontsize=13, fontweight="bold", color="#1e293b")
+            for i, (lbl, val, col) in enumerate([
+                ("Predicted",    str(csv_prediction)             if csv_prediction    is not None else "N/A", "#2563eb"),
+                ("Confidence",   f"{float(csv_confidence):.1%}" if csv_confidence    is not None else "N/A", "#16a34a"),
+                ("Ground Truth", str(csv_ground_truth)           if csv_ground_truth is not None else "N/A", "#dc2626"),
+            ]):
+                xc = 0.17 + i * 0.33
+                ax_info.text(xc, 0.56, lbl, transform=ax_info.transAxes,
+                             ha="center", va="center", fontsize=9.5, color="#6b7280", fontweight="bold")
+                ax_info.text(xc, 0.22, val, transform=ax_info.transAxes,
+                             ha="center", va="center", fontsize=13, color=col, fontweight="bold")
+
+            ax_trace = fig.add_subplot(gs[1])
+            ax_trace.set_axis_off()
+            ax_trace.set_xlim(0, 1)
+            ax_trace.set_ylim(0, 1)
+            ax_trace.text(0.01, 0.97, "Process Trace Sequence:",
+                          transform=ax_trace.transAxes, ha="left", va="top",
+                          fontsize=10, fontweight="bold", color="#374151")
+            MAX_PER_ROW, MAX_TOTAL = 8, 16
+            acts = trace_activities[:MAX_TOTAL]
+            if len(trace_activities) > MAX_TOTAL:
+                acts = trace_activities[:MAX_TOTAL - 1] + [f"+{len(trace_activities) - MAX_TOTAL + 1} more"]
+            trace_rows = [acts[k:k + MAX_PER_ROW] for k in range(0, len(acts), MAX_PER_ROW)]
+            y_pos_list = [0.72, 0.28] if len(trace_rows) > 1 else [0.52]
+            for row_i, row_acts in enumerate(trace_rows[:2]):
+                y = y_pos_list[row_i]
+                n = len(row_acts)
+                xs = np.linspace(1.0 / (2 * n), 1.0 - 1.0 / (2 * n), n)
+                hw = min(0.38 / n, 0.06)
+                for j in range(n - 1):
+                    ax_trace.annotate("",
+                        xy=(xs[j + 1] - hw, y), xytext=(xs[j] + hw, y),
+                        xycoords="axes fraction", textcoords="axes fraction",
+                        arrowprops=dict(arrowstyle="-|>", color="#94a3b8",
+                                       lw=1.3, mutation_scale=10), zorder=1)
+                for act, x in zip(row_acts, xs):
+                    short = (act[:14] + "…") if len(act) > 14 else act
+                    ax_trace.text(x, y, short, transform=ax_trace.transAxes,
+                                  ha="center", va="center", fontsize=7.5,
+                                  color="#1e40af", fontweight="bold",
+                                  bbox=dict(boxstyle="round,pad=0.32", facecolor="#eff6ff",
+                                            edgecolor="#3b82f6", linewidth=1.2), zorder=2)
+
+            ax_bar = fig.add_subplot(gs[2])
+
+        # LIME bar chart (shared by both paths)
+        ax_bar.barh(bar_plot_df["Feature_Label"], bar_plot_df["Weight"], color=bar_colors)
+        ax_bar.axvline(0, color="#222222", linewidth=3)
+        ax_bar.set_title(bar_title, fontsize=16, pad=10)
+        ax_bar.set_xlabel("LIME weight", fontsize=12)
+        ax_bar.tick_params(axis="y", labelsize=11)
+        ax_bar.tick_params(axis="x", labelsize=11)
+        ax_bar.spines["top"].set_visible(False)
+        ax_bar.spines["right"].set_visible(False)
+        ax_bar.spines["left"].set_linewidth(2)
+        ax_bar.spines["bottom"].set_linewidth(2)
+        ax_bar.grid(False)
+
+        fig.savefig(os.path.join(output_dir, f'lime_bar_plot_sample_{display_idx}.png'),
+                    dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
 
     def save_explanations(self, output_dir):
         print("[OK] LIME computations complete.")
@@ -1009,6 +1420,7 @@ def generate_comparison_report(output_dir, shap_dir, lime_dir):
                 for _, row in lime_df.iterrows():
                     activity = row['Activity']
                     activity = re.sub(r'\s+\(x\d+\)$', '', str(activity)).strip()
+                    activity = re.sub(r'^Position\s+\d+:\s*', '', activity).strip()
                     weight = abs(row['Weight'])
                     if activity not in all_lime_weights:
                         all_lime_weights[activity] = []
@@ -1116,6 +1528,116 @@ def select_diverse_samples(data, task, num_diverse=10, label_encoder=None):
     return selected[:min(num_diverse, test_size)]
 
 
+def _parse_sample_indices(raw_indices):
+    if raw_indices is None:
+        return []
+    if isinstance(raw_indices, str):
+        parts = re.split(r"[\s,]+", raw_indices.strip())
+    elif isinstance(raw_indices, (list, tuple, np.ndarray)):
+        parts = list(raw_indices)
+    else:
+        parts = [raw_indices]
+
+    indices = []
+    for part in parts:
+        if part in {None, ""}:
+            continue
+        try:
+            value = int(part)
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            indices.append(value)
+    return indices
+
+
+def _filter_test_indices_by_prefix_length(test_data, min_prefix=None, max_prefix=None):
+    """Return indices of test sequences whose non-padding length falls in [min_prefix, max_prefix].
+    test_data may be a plain array or a (seq, temp) tuple."""
+    min_p = int(min_prefix) if min_prefix is not None else 1
+    max_p = int(max_prefix) if max_prefix is not None else None
+    if max_p is not None and max_p < min_p:
+        raise RuntimeError(
+            f"Invalid prefix range: min_prefix_length={min_p}, max_prefix_length={max_p}."
+        )
+    seqs = test_data[0] if isinstance(test_data, (list, tuple)) else test_data
+    n = len(seqs)
+    filtered, skipped = [], 0
+    for idx in range(n):
+        plen = int(np.sum(seqs[idx] > 0))
+        if plen < min_p:
+            skipped += 1
+            continue
+        if max_p is not None and plen > max_p:
+            skipped += 1
+            continue
+        filtered.append(idx)
+    if not filtered:
+        range_label = f">= {min_p}" if max_p is None else f"{min_p}..{max_p}"
+        raise RuntimeError(
+            f"No test sequences matched the prefix length range ({range_label}). "
+            f"Skipped {skipped}/{n} sequences."
+        )
+    range_label = f">= {min_p}" if max_p is None else f"{min_p}..{max_p}"
+    print(f"[INFO] Prefix filter ({range_label}): kept {len(filtered)}/{n} test sequences")
+    return filtered
+
+
+def _select_protocol_sample_indices(data, task, test_size, requested_count, config=None, label_encoder=None, valid_pool=None):
+    """Select up to requested_count indices.  When valid_pool is provided (a list of
+    pre-filtered original test indices) sampling happens within that pool."""
+    pool = list(valid_pool) if valid_pool is not None else list(range(test_size))
+    pool_size = len(pool)
+
+    config = config or {}
+    requested_count = int(requested_count) if requested_count is not None else 50
+    requested_count = max(1, min(requested_count, pool_size)) if pool_size > 0 else 0
+    strategy = str(config.get("evaluation_sampling_strategy", "evenly_spaced") or "evenly_spaced").strip().lower()
+    seed = int(config.get("evaluation_random_seed", 42) or 42)
+    manual_indices = _parse_sample_indices(config.get("evaluation_sample_indices"))
+
+    if pool_size <= 0:
+        return [], strategy, seed, manual_indices
+
+    if strategy == "manual":
+        pool_set = set(pool)
+        selected = []
+        seen = set()
+        for idx in manual_indices:
+            if idx in pool_set and idx not in seen:
+                selected.append(idx)
+                seen.add(idx)
+            if len(selected) >= requested_count:
+                break
+        return selected, strategy, seed, manual_indices
+
+    if strategy == "random":
+        rng = np.random.default_rng(seed)
+        positions = sorted(rng.choice(pool_size, size=requested_count, replace=False).astype(int).tolist())
+        selected = [pool[i] for i in positions]
+        return selected, strategy, seed, manual_indices
+
+    if strategy == "diverse":
+        all_diverse = select_diverse_samples(
+            data,
+            task,
+            num_diverse=requested_count,
+            label_encoder=label_encoder,
+        )
+        if valid_pool is not None:
+            pool_set = set(pool)
+            selected = [i for i in all_diverse if i in pool_set][:requested_count]
+        else:
+            selected = all_diverse
+        return selected, strategy, seed, manual_indices
+
+    if requested_count == 1:
+        return [pool[0]], "evenly_spaced", seed, manual_indices
+    positions = sorted(set(np.linspace(0, pool_size - 1, requested_count, dtype=int).tolist()))
+    selected = [pool[i] for i in positions]
+    return selected, "evenly_spaced", seed, manual_indices
+
+
 def _validate_explainability_coverage(task, label_encoder, shap_dir=None, lime_dir=None):
     if task != 'activity' or label_encoder is None:
         return
@@ -1150,12 +1672,12 @@ def _validate_explainability_coverage(task, label_encoder, shap_dir=None, lime_d
 
 
 # =============================================================================
-# EXPLAINABILITY BENCHMARK METRICS
+# EXPLAINABILITY EVALUATION METRICS
 # =============================================================================
 
-class ExplainabilityBenchmark:
+class ExplainabilityEvaluation:
     """
-    Comprehensive benchmark metrics for evaluating and comparing explainability methods.
+    Comprehensive evaluation metrics for evaluating and comparing explainability methods.
     
     Metrics implemented:
     1. Faithfulness - Do top features actually impact predictions?
@@ -1167,8 +1689,9 @@ class ExplainabilityBenchmark:
     Reference: Evaluating Feature Attribution Methods (Nguyen et al., 2020)
     """
     
-    def __init__(self, model, task='activity', is_multi_input=False, 
-                 seq_shape=None, temp_shape=None, scaler=None, attribution_fn=None):
+    def __init__(self, model, task='activity', is_multi_input=False,
+                 seq_shape=None, temp_shape=None, scaler=None, attribution_fn=None,
+                 protocol=None):
         self.model = model
         self.task = task
         self.is_multi_input = is_multi_input
@@ -1176,6 +1699,9 @@ class ExplainabilityBenchmark:
         self.temp_shape = temp_shape
         self.scaler = scaler
         self.attribution_fn = attribution_fn
+        self.protocol = protocol or {}
+        self.random_seed = int(self.protocol.get("random_seed", 42) or 42)
+        self.rng = np.random.default_rng(self.random_seed)
         self.results = {}
         
     def _predict(self, x_seq, x_temp=None):
@@ -1211,8 +1737,8 @@ class ExplainabilityBenchmark:
         valid_positions = np.asarray(valid_positions, dtype=int)
         if valid_positions.size == 0:
             return np.array([], dtype=int)
-        if k >= valid_positions.size:
-            return valid_positions
+        if k > valid_positions.size:
+            return np.array([], dtype=int)
         valid_scores = np.abs(attr[valid_positions])
         selected = np.argsort(valid_scores)[-k:]
         return valid_positions[selected]
@@ -1245,11 +1771,43 @@ class ExplainabilityBenchmark:
             return 1.0 if np.linalg.norm(baseline - perturbed) == 0 else 0.0
         return float(np.dot(baseline, perturbed) / denom)
 
+    @staticmethod
+    def _mean_or_none(values):
+        return float(np.mean(values)) if values else None
+
+    @staticmethod
+    def _std_or_none(values):
+        return float(np.std(values)) if values else None
+
+    @staticmethod
+    def _median_or_none(values):
+        return float(np.median(values)) if values else None
+
+    @staticmethod
+    def _finite_or_none(value):
+        return float(value) if value is not None and np.isfinite(value) else None
+
+    @classmethod
+    def _correlations_or_none(cls, x, y):
+        if len(x) < 2 or len(y) < 2:
+            return None, None, None, None
+        if len(set(np.asarray(x, dtype=float).tolist())) <= 1 or len(set(np.asarray(y, dtype=float).tolist())) <= 1:
+            return None, None, None, None
+        from scipy.stats import pearsonr, spearmanr
+        spearman_corr, spearman_p = spearmanr(x, y)
+        pearson_corr, pearson_p = pearsonr(x, y)
+        return (
+            cls._finite_or_none(spearman_corr),
+            cls._finite_or_none(spearman_p),
+            cls._finite_or_none(pearson_corr),
+            cls._finite_or_none(pearson_p),
+        )
+
     # -------------------------------------------------------------------------
     # 1. FAITHFULNESS METRICS
     # -------------------------------------------------------------------------
     
-    def faithfulness_correlation(self, x_seq, x_temp, attributions, k_values=[1, 3, 5, 10]):
+    def faithfulness_correlation(self, x_seq, x_temp, attributions, k_values=[5, 10, 15, 20, 25]):
         """
         Faithfulness measures if removing top-k important features changes predictions.
         Higher correlation between importance and prediction change = better faithfulness.
@@ -1275,6 +1833,7 @@ class ExplainabilityBenchmark:
                 
             pred_changes = []
             importance_sums = []
+            skipped_short = 0
             
             for i in range(n_samples):
                 # Original prediction
@@ -1283,8 +1842,11 @@ class ExplainabilityBenchmark:
                 
                 # Get top-k important feature indices
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = self._top_k_indices(sample_attr, k, self._valid_positions(x_seq[i]))
+                valid_positions = self._valid_positions(x_seq[i])
+                top_k_idx = self._top_k_indices(sample_attr, k, valid_positions)
                 if top_k_idx.size == 0:
+                    if valid_positions is None or len(valid_positions) < k:
+                        skipped_short += 1
                     continue
                 
                 # Mask top-k features
@@ -1301,26 +1863,25 @@ class ExplainabilityBenchmark:
                 importance_sums.append(sample_attr[top_k_idx].sum())
             
             # Correlation between importance sum and prediction change
-            from scipy.stats import spearmanr, pearsonr
-            if len(set(pred_changes)) > 1 and len(set(importance_sums)) > 1:
-                spearman_corr, spearman_p = spearmanr(importance_sums, pred_changes)
-                pearson_corr, pearson_p = pearsonr(importance_sums, pred_changes)
-            else:
-                spearman_corr, spearman_p = 0.0, 1.0
-                pearson_corr, pearson_p = 0.0, 1.0
+            spearman_corr, spearman_p, pearson_corr, pearson_p = self._correlations_or_none(
+                importance_sums,
+                pred_changes,
+            )
             
             results[f'faithfulness_k{k}'] = {
-                'spearman_correlation': float(spearman_corr),
-                'spearman_p_value': float(spearman_p),
-                'pearson_correlation': float(pearson_corr),
-                'pearson_p_value': float(pearson_p),
-                'mean_pred_change': float(np.mean(pred_changes)),
-                'std_pred_change': float(np.std(pred_changes))
+                'spearman_correlation': spearman_corr,
+                'spearman_p_value': spearman_p,
+                'pearson_correlation': pearson_corr,
+                'pearson_p_value': pearson_p,
+                'mean_pred_change': self._mean_or_none(pred_changes),
+                'std_pred_change': self._std_or_none(pred_changes),
+                'valid_sample_count': len(pred_changes),
+                'skipped_short_sequence_count': skipped_short,
             }
             
         return results
     
-    def comprehensiveness(self, x_seq, x_temp, attributions, k_values=[1, 3, 5, 10]):
+    def comprehensiveness(self, x_seq, x_temp, attributions, k_values=[5, 10, 15, 20, 25]):
         """
         Comprehensiveness: Prediction change when removing top-k features.
         Higher = explanations capture important features.
@@ -1338,14 +1899,18 @@ class ExplainabilityBenchmark:
                 continue
             
             comp_scores = []
+            skipped_short = 0
             
             for i in range(n_samples):
                 orig_pred = self._predict(x_seq[i:i+1], x_temp[i:i+1] if x_temp is not None else None)
                 target_idx = self._target_index(orig_pred)
                 
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = self._top_k_indices(sample_attr, k, self._valid_positions(x_seq[i]))
+                valid_positions = self._valid_positions(x_seq[i])
+                top_k_idx = self._top_k_indices(sample_attr, k, valid_positions)
                 if top_k_idx.size == 0:
+                    if valid_positions is None or len(valid_positions) < k:
+                        skipped_short += 1
                     continue
                 
                 x_masked = x_seq[i:i+1].copy()
@@ -1358,14 +1923,16 @@ class ExplainabilityBenchmark:
                 comp_scores.append(comp)
             
             results[f'comprehensiveness_k{k}'] = {
-                'mean': float(np.mean(comp_scores)),
-                'std': float(np.std(comp_scores)),
-                'median': float(np.median(comp_scores))
+                'mean': self._mean_or_none(comp_scores),
+                'std': self._std_or_none(comp_scores),
+                'median': self._median_or_none(comp_scores),
+                'valid_sample_count': len(comp_scores),
+                'skipped_short_sequence_count': skipped_short,
             }
         
         return results
     
-    def sufficiency(self, x_seq, x_temp, attributions, k_values=[1, 3, 5, 10]):
+    def sufficiency(self, x_seq, x_temp, attributions, k_values=[5, 10, 15, 20, 25]):
         """
         Sufficiency: Prediction using ONLY top-k features.
         Lower = top features are sufficient to make prediction.
@@ -1383,14 +1950,18 @@ class ExplainabilityBenchmark:
                 continue
             
             suff_scores = []
+            skipped_short = 0
             
             for i in range(n_samples):
                 orig_pred = self._predict(x_seq[i:i+1], x_temp[i:i+1] if x_temp is not None else None)
                 target_idx = self._target_index(orig_pred)
                 
                 sample_attr = np.abs(attributions[i]) if attributions.ndim > 1 else np.abs(attributions)
-                top_k_idx = self._top_k_indices(sample_attr, k, self._valid_positions(x_seq[i]))
+                valid_positions = self._valid_positions(x_seq[i])
+                top_k_idx = self._top_k_indices(sample_attr, k, valid_positions)
                 if top_k_idx.size == 0:
+                    if valid_positions is None or len(valid_positions) < k:
+                        skipped_short += 1
                     continue
                 
                 # Keep ONLY top-k features, mask everything else
@@ -1404,9 +1975,11 @@ class ExplainabilityBenchmark:
                 suff_scores.append(suff)
             
             results[f'sufficiency_k{k}'] = {
-                'mean': float(np.mean(suff_scores)),
-                'std': float(np.std(suff_scores)),
-                'median': float(np.median(suff_scores))
+                'mean': self._mean_or_none(suff_scores),
+                'std': self._std_or_none(suff_scores),
+                'median': self._median_or_none(suff_scores),
+                'valid_sample_count': len(suff_scores),
+                'skipped_short_sequence_count': skipped_short,
             }
         
         return results
@@ -1434,6 +2007,7 @@ class ExplainabilityBenchmark:
         n_samples = min(len(x_seq), 20)
         variance_scores = []
         cosine_scores = []
+        valid_sample_count = 0
 
         for i in range(n_samples):
             original_attr = np.asarray(attributions[i], dtype=float)
@@ -1444,13 +2018,13 @@ class ExplainabilityBenchmark:
                 valid_positions = self._valid_positions(x_perturbed[0])
                 if valid_positions.size > 0:
                     n_mask = max(1, int(np.ceil(valid_positions.size * 0.1)))
-                    mask_positions = np.random.choice(valid_positions, size=n_mask, replace=False)
+                    mask_positions = self.rng.choice(valid_positions, size=n_mask, replace=False)
                     x_perturbed[0, mask_positions] = 0
 
                 x_temp_perturbed = None
                 if x_temp is not None:
                     x_temp_perturbed = x_temp[i:i+1].copy().astype(float)
-                    temp_noise = np.random.normal(0.0, noise_std, x_temp_perturbed.shape)
+                    temp_noise = self.rng.normal(0.0, noise_std, x_temp_perturbed.shape)
                     x_temp_perturbed = (x_temp_perturbed + temp_noise).astype(x_temp.dtype, copy=False)
 
                 perturbed_attr = self.attribution_fn(x_perturbed, x_temp_perturbed)
@@ -1468,17 +2042,23 @@ class ExplainabilityBenchmark:
             if perturbed_attrs:
                 stacked = np.stack(perturbed_attrs, axis=0)
                 variance_scores.append(float(np.var(stacked, axis=0).mean()))
+                valid_sample_count += 1
 
-        mean_variance = float(np.mean(variance_scores)) if variance_scores else 0.0
-        max_variance = float(np.max(variance_scores)) if variance_scores else 0.0
-        mean_cosine = float(np.mean(cosine_scores)) if cosine_scores else 0.0
+        mean_variance = self._mean_or_none(variance_scores)
+        max_variance = float(np.max(variance_scores)) if variance_scores else None
+        mean_cosine = self._mean_or_none(cosine_scores)
 
         return {
             'stability': {
                 'mean_variance': mean_variance,
                 'max_variance': max_variance,
                 'mean_cosine_similarity': mean_cosine,
-                'stability_score': mean_cosine
+                'stability_score': mean_cosine,
+                'valid_sample_count': valid_sample_count,
+                'perturbations_per_sample': int(n_perturbations),
+                'masked_position_fraction': 0.1,
+                'temporal_noise_std': float(noise_std),
+                'random_seed': int(self.random_seed),
             }
         }
     
@@ -1486,7 +2066,7 @@ class ExplainabilityBenchmark:
     # 3. METHOD AGREEMENT METRICS
     # -------------------------------------------------------------------------
     
-    def method_agreement(self, shap_attributions, lime_attributions, k_values=[3, 5, 10]):
+    def method_agreement(self, shap_attributions, lime_attributions, k_values=[5, 10, 15, 20, 25]):
         """
         Agreement between SHAP and LIME on top-k important features.
         
@@ -1508,6 +2088,7 @@ class ExplainabilityBenchmark:
             jaccard_scores = []
             overlap_scores = []
             rank_correlations = []
+            skipped_short = 0
             
             for i in range(n_samples):
                 shap_attr = np.abs(shap_attributions[i])
@@ -1521,6 +2102,7 @@ class ExplainabilityBenchmark:
                 lime_attr = lime_attr[:min_len]
                 
                 if k > min_len:
+                    skipped_short += 1
                     continue
                 
                 # Top-k indices
@@ -1545,9 +2127,11 @@ class ExplainabilityBenchmark:
                         rank_correlations.append(corr)
             
             results[f'agreement_k{k}'] = {
-                'jaccard_similarity': float(np.mean(jaccard_scores)) if jaccard_scores else 0.0,
-                'top_k_overlap': float(np.mean(overlap_scores)) if overlap_scores else 0.0,
-                'rank_correlation': float(np.mean(rank_correlations)) if rank_correlations else 0.0
+                'jaccard_similarity': self._mean_or_none(jaccard_scores),
+                'top_k_overlap': self._mean_or_none(overlap_scores),
+                'rank_correlation': self._mean_or_none(rank_correlations),
+                'valid_sample_count': len(jaccard_scores),
+                'skipped_short_sequence_count': skipped_short,
             }
         
         return results
@@ -1575,7 +2159,11 @@ class ExplainabilityBenchmark:
             
             sample_attr = np.abs(attributions[i])
             valid_positions = self._valid_positions(x_seq[i])
+            if valid_positions.size == 0:
+                continue
             sorted_indices = self._top_k_indices(sample_attr, len(valid_positions), valid_positions)[::-1]
+            if sorted_indices.size == 0:
+                continue
             
             predictions = [self._target_score(orig_pred, target_idx)]
             x_masked = x_seq[i:i+1].copy()
@@ -1595,9 +2183,60 @@ class ExplainabilityBenchmark:
         
         return {
             'monotonicity': {
-                'mean': float(np.mean(monotonicity_scores)),
-                'std': float(np.std(monotonicity_scores)),
-                'median': float(np.median(monotonicity_scores))
+                'mean': self._mean_or_none(monotonicity_scores),
+                'std': self._std_or_none(monotonicity_scores),
+                'median': self._median_or_none(monotonicity_scores),
+                'valid_sample_count': len(monotonicity_scores),
+                'max_removed_positions_per_sample': 10,
+            }
+        }
+
+    def sparsity(self, attributions, threshold_ratio=0.05):
+        """
+        Sparsity: how concentrated attribution mass is on a small subset of features.
+
+        We report a thresholded active-feature fraction and its complement
+        (`sparsity_score`), where higher is better.
+        """
+        print("Computing Sparsity...")
+        attrs = np.asarray(attributions, dtype=float)
+        if attrs.ndim == 1:
+            attrs = attrs.reshape(1, -1)
+
+        active_fractions = []
+        mass_top3 = []
+        mass_top5 = []
+
+        for row in attrs:
+            abs_row = np.abs(np.asarray(row, dtype=float).reshape(-1))
+            if abs_row.size == 0:
+                continue
+            max_val = float(abs_row.max())
+            if max_val <= 0:
+                active_fractions.append(0.0)
+                mass_top3.append(0.0)
+                mass_top5.append(0.0)
+                continue
+
+            threshold = threshold_ratio * max_val
+            active_fraction = float(np.mean(abs_row >= threshold))
+            total_mass = float(abs_row.sum())
+            sorted_mass = np.sort(abs_row)[::-1]
+            top3_mass = float(sorted_mass[: min(3, len(sorted_mass))].sum() / total_mass) if total_mass > 0 else 0.0
+            top5_mass = float(sorted_mass[: min(5, len(sorted_mass))].sum() / total_mass) if total_mass > 0 else 0.0
+            active_fractions.append(active_fraction)
+            mass_top3.append(top3_mass)
+            mass_top5.append(top5_mass)
+
+        mean_active = self._mean_or_none(active_fractions)
+        return {
+            'sparsity': {
+                'active_fraction': mean_active,
+                'sparsity_score': None if mean_active is None else float(1.0 - mean_active),
+                'top3_mass_fraction': self._mean_or_none(mass_top3),
+                'top5_mass_fraction': self._mean_or_none(mass_top5),
+                'threshold_ratio': float(threshold_ratio),
+                'valid_sample_count': len(active_fractions),
             }
         }
     
@@ -1640,29 +2279,31 @@ class ExplainabilityBenchmark:
         if valid_mask.sum() > 2:
             recency_corr, recency_p = spearmanr(positions[valid_mask], avg_importance[valid_mask])
         else:
-            recency_corr, recency_p = 0.0, 1.0
+            recency_corr, recency_p = None, None
         
         valid_positions = positions[valid_mask]
         valid_importance = avg_importance[valid_mask]
         
         return {
             'temporal_consistency': {
-                'recency_correlation': float(recency_corr) if not np.isnan(recency_corr) else 0.0,
-                'recency_p_value': float(recency_p) if not np.isnan(recency_p) else 1.0,
+                'recency_correlation': self._finite_or_none(recency_corr),
+                'recency_p_value': self._finite_or_none(recency_p),
                 'position_importance': avg_importance.tolist(),
                 'most_important_position': int(valid_positions[np.argmax(valid_importance)]) if valid_positions.size else 0,
-                'least_important_position': int(valid_positions[np.argmin(valid_importance)]) if valid_positions.size else 0
+                'least_important_position': int(valid_positions[np.argmin(valid_importance)]) if valid_positions.size else 0,
+                'valid_sample_count': int(n_samples),
+                'valid_position_count': int(valid_mask.sum()),
             }
         }
     
     # -------------------------------------------------------------------------
-    # MAIN BENCHMARK RUNNER
+    # MAIN EVALUATION RUNNER
     # -------------------------------------------------------------------------
     
-    def run_full_benchmark(self, x_seq, x_temp, shap_values, lime_values=None, 
-                          test_seq=None, k_values=[1, 3, 5, 10]):
+    def run_full_evaluation(self, x_seq, x_temp, shap_values, lime_values=None,
+                          test_seq=None, k_values=[5, 10, 15, 20, 25]):
         """
-        Run all benchmark metrics and return comprehensive results.
+        Run all evaluation metrics and return comprehensive results.
         
         Args:
             x_seq: Test sequences (n_samples, seq_len)
@@ -1673,10 +2314,10 @@ class ExplainabilityBenchmark:
             k_values: List of k values for top-k metrics
             
         Returns:
-            Dictionary with all benchmark results
+            Dictionary with all evaluation results
         """
         print("\n" + "="*60)
-        print("EXPLAINABILITY BENCHMARK EVALUATION")
+        print("EXPLAINABILITY EVALUATION")
         print("="*60)
         
         results = {
@@ -1685,7 +2326,17 @@ class ExplainabilityBenchmark:
                 'n_samples': len(x_seq),
                 'seq_len': x_seq.shape[1],
                 'k_values': k_values,
-                'is_multi_input': self.is_multi_input
+                'is_multi_input': self.is_multi_input,
+                'top_k_policy': 'Samples with fewer than k valid non-padding positions are excluded for that k.',
+                'prediction_change': (
+                    'classification_target_probability_drop'
+                    if self.task == 'activity'
+                    else 'absolute_regression_output_difference'
+                ),
+                'faithfulness_note': 'Faithfulness correlation uses the same top-k deletion perturbation as comprehensiveness, then correlates attribution mass with prediction change across samples.',
+                'sufficiency_note': 'Sufficiency is reported as an original-minus-top-k-only score gap; lower values indicate the selected positions are more sufficient.',
+                'stability_note': 'Stability recomputes SHAP after random masking of valid sequence positions and optional temporal-feature noise.',
+                'protocol': self.protocol,
             }
         }
         
@@ -1729,7 +2380,14 @@ class ExplainabilityBenchmark:
         except Exception as e:
             print(f"[WARNING] Stability computation failed: {e}")
             results['stability'] = {'error': str(e)}
-        
+
+        # 5b. Sparsity
+        try:
+            results['sparsity'] = self.sparsity(shap_values)
+        except Exception as e:
+            print(f"[WARNING] Sparsity computation failed: {e}")
+            results['sparsity'] = {'error': str(e)}
+
         # 6. Method Agreement (if LIME available)
         if lime_values is not None:
             try:
@@ -1752,14 +2410,14 @@ class ExplainabilityBenchmark:
         self.results = results
         return results
     
-    def save_results(self, output_dir, filename='benchmark_results.json'):
-        """Save benchmark results to JSON file."""
+    def save_results(self, output_dir, filename='evaluation_results.json'):
+        """Save evaluation results to JSON file."""
         import json
         
         filepath = os.path.join(output_dir, filename)
         with open(filepath, 'w') as f:
             json.dump(self.results, f, indent=2, default=str)
-        print(f"[OK] Benchmark results saved to: {filepath}")
+        print(f"[OK] Evaluation results saved to: {filepath}")
         
         # Also save a summary CSV for easy comparison
         summary_rows = []
@@ -1787,20 +2445,20 @@ class ExplainabilityBenchmark:
         
         if summary_rows:
             summary_df = pd.DataFrame(summary_rows)
-            summary_path = os.path.join(output_dir, 'benchmark_summary.csv')
+            summary_path = os.path.join(output_dir, 'evaluation_summary.csv')
             summary_df.to_csv(summary_path, index=False)
-            print(f"[OK] Benchmark summary saved to: {summary_path}")
+            print(f"[OK] Evaluation summary saved to: {summary_path}")
         
         return filepath
     
     def print_summary(self):
-        """Print a human-readable summary of benchmark results."""
+        """Print a human-readable summary of evaluation results."""
         if not self.results:
-            print("No benchmark results available.")
+            print("No evaluation results available.")
             return
         
         print("\n" + "="*60)
-        print("BENCHMARK SUMMARY")
+        print("EVALUATION SUMMARY")
         print("="*60)
         
         # Faithfulness
@@ -1853,8 +2511,10 @@ class ExplainabilityBenchmark:
         print("\n" + "="*60)
 
 
-def run_transformer_explainability(model, data, output_dir, task='activity', num_samples=50, methods='all', label_encoder=None, scaler=None, timestamps=None, feature_config=None, run_benchmark=True):
+def run_transformer_explainability(model, data, output_dir, task='activity', num_samples=50, methods='all', label_encoder=None, scaler=None, timestamps=None, feature_config=None, run_evaluation=True, evaluation_config=None, local_num_samples=None, global_sample_percent=100, min_prefix_length=None, max_prefix_length=None):
     os.makedirs(output_dir, exist_ok=True)
+    evaluation_config = evaluation_config or {}
+    k_values = [5, 10, 15, 20, 25]
     
     # Initialize explainer references
     se = None  # SHAP explainer
@@ -1880,13 +2540,105 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         train_data = data['X_train']
         test_data = data['X_test']
         num_classes = len(np.unique(data['y_train']))
-        if num_samples < num_classes:
+        if not evaluation_config and num_samples < num_classes:
             print(f"[WARNING] num_samples={num_samples} < num_classes={num_classes}. Increasing for full coverage.")
             num_samples = num_classes
+        test_size = len(test_data)
     else:
         train_data = (data['X_seq_train'], data['X_temp_train'])
         test_data = (data['X_seq_test'], data['X_temp_test'])
         num_classes = None
+        test_size = len(test_data[0])
+
+    # Apply optional prefix length filter to get the eligible pool of test indices.
+    if min_prefix_length is not None or max_prefix_length is not None:
+        valid_pool = _filter_test_indices_by_prefix_length(test_data, min_prefix_length, max_prefix_length)
+    else:
+        valid_pool = list(range(test_size))
+
+    # Compute per-purpose sample counts from the valid pool.
+    pool_size = len(valid_pool)
+
+    # Global (SHAP): percentage of the filtered pool.
+    pct = max(1, min(100, int(global_sample_percent or 100)))
+    global_count = max(1, int(pool_size * pct / 100))
+
+    # Local (LIME): absolute count; falls back to legacy num_samples.
+    local_count_raw = local_num_samples if local_num_samples is not None else int(evaluation_config.get("transformer_explanation_samples", num_samples) or num_samples)
+    local_count = max(1, min(int(local_count_raw), pool_size))
+
+    # Evaluation: separate count from config, else match local.
+    evaluation_count_raw = evaluation_config.get("evaluation_samples", None)
+    evaluation_count = int(evaluation_count_raw) if evaluation_count_raw is not None else local_count
+    evaluation_count = max(1, min(evaluation_count, pool_size))
+
+    # Select global (SHAP/aggregation) indices within the valid pool.
+    sample_indices, sampling_strategy, random_seed, requested_manual_indices = _select_protocol_sample_indices(
+        data,
+        task,
+        test_size,
+        global_count,
+        config=evaluation_config,
+        label_encoder=label_encoder,
+        valid_pool=valid_pool,
+    )
+
+    # Select local (LIME) indices within the valid pool.
+    lime_sample_indices, _, _, _ = _select_protocol_sample_indices(
+        data,
+        task,
+        test_size,
+        local_count,
+        config=evaluation_config,
+        label_encoder=label_encoder,
+        valid_pool=valid_pool,
+    )
+
+    if not sample_indices and not lime_sample_indices:
+        raise RuntimeError(
+            "Transformer explainability protocol selected no valid test samples. "
+            "Check evaluation_sample_indices or sampling configuration."
+        )
+    num_samples = len(sample_indices)
+    evaluation_protocol = {
+        "name": evaluation_config.get("evaluation_protocol_name") or "Perturbation-Based Explainability Evaluation",
+        "version": evaluation_config.get("evaluation_protocol_version") or "1.0",
+        "notes": evaluation_config.get("evaluation_protocol_notes") or "",
+        "model_family": "transformer",
+        "task": task,
+        "sampling_strategy": sampling_strategy,
+        "random_seed": random_seed,
+        "min_prefix_length": min_prefix_length,
+        "max_prefix_length": max_prefix_length,
+        "valid_pool_size": pool_size,
+        "global_sample_percent": pct,
+        "requested_global_sample_count": global_count,
+        "requested_local_sample_count": local_count,
+        "actual_global_sample_count": int(num_samples),
+        "actual_local_sample_count": int(len(lime_sample_indices)),
+        "requested_sample_count": int(evaluation_config.get("transformer_explanation_samples", num_samples) or num_samples),
+        "actual_sample_count": int(num_samples),
+        "test_size": int(test_size),
+        "requested_manual_sample_indices": requested_manual_indices,
+        "selected_sample_indices": [int(idx) for idx in sample_indices],
+        "selected_local_sample_indices": [int(idx) for idx in lime_sample_indices],
+        "k_values": k_values,
+        "masking_strategy": "zero_mask_selected_sequence_positions",
+        "top_k_policy": "exclude samples with fewer than k valid non-padding positions",
+        "prediction_change": "classification target probability drop" if task == "activity" else "absolute regression output difference",
+        "shap_output_policy": "predicted target class for activity classification; scalar output for regression tasks",
+        "lime_feature_policy": "sequence positions are categorical token features; plots and evaluation extraction use LIME local feature indices mapped to the actual sample activity",
+        "metrics": [
+            "faithfulness_correlation",
+            "comprehensiveness",
+            "sufficiency_gap",
+            "monotonicity",
+            "stability",
+            "sparsity",
+            "method_agreement",
+            "temporal_recency_correlation",
+        ],
+    }
 
     if methods in ['shap', 'all']:
         print("\n--- Running SHAP ---")
@@ -1894,28 +2646,16 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         os.makedirs(shap_dir, exist_ok=True)
         try:
             if is_time_task and ExplainabilityConfig.ENABLE_TIMESTEP_EXPLANATIONS:
-                se = TimestepSHAPExplainer(model, task, label_encoder, scaler, timestamps)
+                se = TimestepSHAPExplainer(model, task, label_encoder, scaler, timestamps, random_seed=random_seed)
             else:
-                se = SHAPExplainer(model, task, label_encoder, scaler)
+                se = SHAPExplainer(model, task, label_encoder, scaler, random_seed=random_seed)
             se.initialize_explainer(train_data)
-            shap_indices = None
-            if task == 'activity':
-                shap_indices = select_diverse_samples(
-                    data, task, num_diverse=num_samples, label_encoder=label_encoder
-                )
-                if not shap_indices:
-                    shap_indices = None
+            evaluation_protocol["shap_background_random_seed"] = int(random_seed)
+            evaluation_protocol["shap_background_indices"] = getattr(se, "background_indices", None)
+            shap_indices = sample_indices
             se.explain_samples(test_data, num_samples, indices=shap_indices)
-            if isinstance(se, TimestepSHAPExplainer) and se.model_has_timestep_outputs:
-                print("\n[SHAP] Generating timestep-level visualizations...")
-                for i in range(min(5, num_samples)):
-                    se.plot_temporal_evolution(shap_dir, sample_idx=i, show_prediction=True)
-                for i in range(min(3, num_samples)):
-                    se.plot_timestep_heatmap(shap_dir, sample_idx=i)
-                se.plot_global_temporal_importance(shap_dir)
-            else:
-                se.plot_bar(shap_dir)
-                se.plot_summary(shap_dir)
+            se.plot_bar(shap_dir)
+            se.plot_summary(shap_dir)
             se.save_explanations(shap_dir)
         except Exception as e:
             print(f"[ERROR] SHAP explainability failed: {e}")
@@ -1937,8 +2677,8 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
                 le.vocab_size = int(feature_config['vocab_size'])
             le.initialize_explainer(train_data, num_classes)
             
-            # Select diverse samples FIRST
-            diverse_samples = select_diverse_samples(data, task, num_diverse=num_samples, label_encoder=label_encoder)
+            # Use the local (prefix-filtered) sample set for LIME plots.
+            diverse_samples = lime_sample_indices if lime_sample_indices else sample_indices
             if not diverse_samples:
                 print("[WARNING] No samples available for LIME. Skipping LIME explainability.")
                 le.explanations = []
@@ -1949,10 +2689,12 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
                 if isinstance(test_data, (list, tuple)):
                     diverse_test_seq = test_data[0][diverse_samples]
                     diverse_test_temp = test_data[1][diverse_samples]
+                    sequence_feature_count = int(diverse_test_seq.shape[1])
                     print(f"[DEBUG] Extracted {len(diverse_test_seq)} test sequences, {len(diverse_test_temp)} temp features")
                     diverse_test_data = (diverse_test_seq, diverse_test_temp)
                 else:
                     diverse_test_data = test_data[diverse_samples]
+                    sequence_feature_count = int(diverse_test_data.shape[1])
                     print(f"[DEBUG] Extracted {len(diverse_test_data)} test samples")
                 
                 y_true_all = data.get('y_test', None)
@@ -1962,7 +2704,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
                 le.explain_samples(
                     diverse_test_data,
                     num_samples=len(diverse_samples),
-                    num_features=30,
+                    num_features=sequence_feature_count,
                     y_true=y_true_diverse
                 )
                 print(f"[DEBUG] Generated {len(le.explanations)} explanations")
@@ -1998,13 +2740,17 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         )
     
     # -------------------------------------------------------------------------
-    # RUN BENCHMARK EVALUATION
+    # RUN EVALUATION
     # -------------------------------------------------------------------------
-    benchmark_results = None
-    if run_benchmark and methods in ['shap', 'all']:
-        print("\n--- Running Benchmark Evaluation ---")
-        benchmark_dir = os.path.join(output_dir, 'benchmark')
-        os.makedirs(benchmark_dir, exist_ok=True)
+    evaluation_results = None
+    if run_evaluation and methods in ['shap', 'all']:
+        print("\n--- Running Evaluation ---")
+        evaluation_dir = os.path.join(output_dir, 'evaluation')
+        os.makedirs(evaluation_dir, exist_ok=True)
+        protocol_path = os.path.join(evaluation_dir, 'evaluation_protocol.json')
+        with open(protocol_path, 'w', encoding='utf-8') as f:
+            json.dump(evaluation_protocol, f, indent=2, default=str)
+        print(f"[OK] Evaluation protocol saved to: {protocol_path}")
         
         try:
             def extract_sequence_attributions(raw_values, seq_len, explainer):
@@ -2012,6 +2758,8 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
                 if values is None:
                     return None
                 values = np.asarray(values)
+                if hasattr(explainer, '_select_target_output_values'):
+                    values = explainer._select_target_output_values(values)
 
                 if explainer.is_multi_input and hasattr(explainer, '_seq_flat_size'):
                     if values.ndim == 2 and values.shape[1] >= explainer._seq_flat_size:
@@ -2040,36 +2788,36 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
 
                 return values.reshape(values.shape[0], -1)[:, :seq_len]
 
-            # Prepare test data for benchmark
+            # Prepare test data for evaluation
             if se is not None and getattr(se, 'test_data', None) is not None:
-                bench_x_seq = np.asarray(se.test_data)
-                bench_x_temp = (
+                evaluation_x_seq = np.asarray(se.test_data)
+                evaluation_x_temp = (
                     np.asarray(se.test_data_temp)
                     if getattr(se, 'test_data_temp', None) is not None
                     else None
                 )
             elif isinstance(test_data, (list, tuple)):
-                bench_x_seq = test_data[0][:num_samples]
-                bench_x_temp = test_data[1][:num_samples]
+                evaluation_x_seq = test_data[0][:num_samples]
+                evaluation_x_temp = test_data[1][:num_samples]
             else:
-                bench_x_seq = test_data[:num_samples]
-                bench_x_temp = None
+                evaluation_x_seq = test_data[:num_samples]
+                evaluation_x_temp = None
             
             # Extract SHAP attributions (handle flattened format)
             shap_attr = None
             if se is not None and se.shap_values is not None:
                 shap_attr = extract_sequence_attributions(
                     se.shap_values.values,
-                    bench_x_seq.shape[1],
+                    evaluation_x_seq.shape[1],
                     se
                 )
-                if shap_attr is not None and shap_attr.shape[0] != len(bench_x_seq):
-                    aligned = min(shap_attr.shape[0], len(bench_x_seq))
-                    print(f"[WARNING] Aligning benchmark samples to {aligned} rows for SHAP consistency.")
+                if shap_attr is not None and shap_attr.shape[0] != len(evaluation_x_seq):
+                    aligned = min(shap_attr.shape[0], len(evaluation_x_seq))
+                    print(f"[WARNING] Aligning evaluation samples to {aligned} rows for SHAP consistency.")
                     shap_attr = shap_attr[:aligned]
-                    bench_x_seq = bench_x_seq[:aligned]
-                    if bench_x_temp is not None:
-                        bench_x_temp = bench_x_temp[:aligned]
+                    evaluation_x_seq = evaluation_x_seq[:aligned]
+                    if evaluation_x_temp is not None:
+                        evaluation_x_temp = evaluation_x_temp[:aligned]
 
             attribution_fn = None
             if se is not None and se.explainer is not None:
@@ -2094,95 +2842,76 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
             
             # Extract LIME attributions if available
             lime_attr = None
-            if methods in ['lime', 'all'] and bench_x_seq is not None and len(bench_x_seq) > 0:
+            if methods in ['lime', 'all'] and evaluation_x_seq is not None and len(evaluation_x_seq) > 0:
                 try:
-                    benchmark_lime = LIMEExplainer(model, task, label_encoder, scaler)
+                    evaluation_lime = LIMEExplainer(model, task, label_encoder, scaler)
                     if feature_config and 'vocab_size' in feature_config:
-                        benchmark_lime.vocab_size = int(feature_config['vocab_size'])
+                        evaluation_lime.vocab_size = int(feature_config['vocab_size'])
                     elif 'le' in dir() and le is not None and le.vocab_size is not None:
-                        benchmark_lime.vocab_size = le.vocab_size
-                    benchmark_lime.initialize_explainer(train_data, num_classes)
-                    benchmark_test_data = (
-                        (bench_x_seq, bench_x_temp) if bench_x_temp is not None else bench_x_seq
+                        evaluation_lime.vocab_size = le.vocab_size
+                    evaluation_lime.initialize_explainer(train_data, num_classes)
+                    evaluation_test_data = (
+                        (evaluation_x_seq, evaluation_x_temp) if evaluation_x_temp is not None else evaluation_x_seq
                     )
-                    benchmark_lime.explain_samples(
-                        benchmark_test_data,
-                        num_samples=len(bench_x_seq),
-                        num_features=int(bench_x_seq.shape[1])
+                    evaluation_lime.explain_samples(
+                        evaluation_test_data,
+                        num_samples=len(evaluation_x_seq),
+                        num_features=int(evaluation_x_seq.shape[1])
                     )
 
                     lime_attr_list = []
-                    seq_len = bench_x_seq.shape[1]
-                    for i, exp in enumerate(benchmark_lime.explanations):
+                    seq_len = evaluation_x_seq.shape[1]
+                    for i, exp in enumerate(evaluation_lime.explanations):
                         if exp is None:
                             lime_attr_list.append(np.full(seq_len, np.nan))
                             continue
 
                         if task == 'activity' and hasattr(exp, 'top_labels') and exp.top_labels:
-                            exp_list = exp.as_list(label=exp.top_labels[0])
+                            feature_weights = evaluation_lime._explanation_feature_weights(exp, label=exp.top_labels[0])
                         else:
-                            exp_list = exp.as_list()
-
-                        exp_map = dict(exp_list)
+                            feature_weights = evaluation_lime._explanation_feature_weights(exp)
                         weights = np.zeros(seq_len)
 
-                        for feat_name, weight in exp_map.items():
-                            name = str(feat_name)
-                            match = re.search(r'(\d+)', name)
-                            if match and "Position" in name:
-                                pos = int(match.group(1)) - 1
-                                if 0 <= pos < seq_len:
-                                    weights[pos] += weight
-                                continue
-
-                            if label_encoder is not None:
-                                activity_name = name.split('<=')[0].split('>')[0].strip()
-                                try:
-                                    token = label_encoder.transform([activity_name])[0] + 1
-                                except Exception:
-                                    continue
-                                positions = np.where(bench_x_seq[i] == token)[0]
-                                if positions.size > 0:
-                                    per_pos = weight / positions.size
-                                    for pos in positions:
-                                        if 0 <= pos < seq_len:
-                                            weights[pos] += per_pos
+                        for feature_idx, weight in feature_weights:
+                            if 0 <= feature_idx < seq_len:
+                                weights[feature_idx] += float(weight)
 
                         lime_attr_list.append(weights)
                     if lime_attr_list:
                         lime_attr = np.array(lime_attr_list)
                 except Exception as e:
-                    print(f"[WARNING] Could not extract LIME attributions for benchmark: {e}")
+                    print(f"[WARNING] Could not extract LIME attributions for evaluation: {e}")
                     lime_attr = None
             
-            # Initialize and run benchmark
-            benchmark = ExplainabilityBenchmark(
+            # Initialize and run evaluation
+            evaluation = ExplainabilityEvaluation(
                 model=model,
                 task=task,
                 is_multi_input=isinstance(test_data, (list, tuple)),
                 seq_shape=getattr(se, '_seq_shape', None) if se else None,
                 temp_shape=getattr(se, '_temp_shape', None) if se else None,
                 scaler=scaler,
-                attribution_fn=attribution_fn
+                attribution_fn=attribution_fn,
+                protocol=evaluation_protocol,
             )
             
             if shap_attr is not None:
-                benchmark_results = benchmark.run_full_benchmark(
-                    x_seq=bench_x_seq,
-                    x_temp=bench_x_temp,
+                evaluation_results = evaluation.run_full_evaluation(
+                    x_seq=evaluation_x_seq,
+                    x_temp=evaluation_x_temp,
                     shap_values=shap_attr,
                     lime_values=lime_attr,
-                    test_seq=bench_x_seq,
-                    k_values=[1, 3, 5, 10]
+                    test_seq=evaluation_x_seq,
+                    k_values=k_values
                 )
                 
-                benchmark.save_results(benchmark_dir)
-                benchmark.print_summary()
+                evaluation.save_results(evaluation_dir)
+                evaluation.print_summary()
             else:
-                print("[WARNING] Could not extract SHAP attributions for benchmark.")
+                print("[WARNING] Could not extract SHAP attributions for evaluation.")
                 
         except Exception as e:
-            print(f"[ERROR] Benchmark evaluation failed: {e}")
+            print(f"[ERROR] Evaluation evaluation failed: {e}")
             import traceback
             traceback.print_exc()
     
@@ -2192,7 +2921,7 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
         generate_comparison_report(output_dir, shap_dir if 'shap' in methods or methods == 'all' else None, 
                                    lime_dir if 'lime' in methods or methods == 'all' else None)
     
-    # Sanity check for benchmark coverage
+    # Sanity check for evaluation coverage
     _validate_explainability_coverage(
         task,
         label_encoder,
@@ -2211,23 +2940,23 @@ def run_transformer_explainability(model, data, output_dir, task='activity', num
     print(f"  [OK] LIME local explanations ({num_samples} diverse samples)")
     print("  [OK] Feature importance summary CSV")
     print("  [OK] Method comparison report")
-    if run_benchmark and benchmark_results:
-        print("  [OK] Benchmark evaluation metrics (JSON + CSV)")
+    if run_evaluation and evaluation_results:
+        print("  [OK] Evaluation evaluation metrics (JSON + CSV)")
     print("="*60)
     
-    return benchmark_results
+    return evaluation_results
 
 
 # =============================================================================
-# BENCHMARK COMPARISON UTILITIES
+# EVALUATION COMPARISON UTILITIES
 # =============================================================================
 
-def compare_benchmark_results(benchmark_files, output_path=None):
+def compare_evaluation_results(evaluation_files, output_path=None):
     """
-    Compare benchmark results across multiple models/datasets.
+    Compare evaluation results across multiple models/datasets.
     
     Args:
-        benchmark_files: List of tuples (model_name, benchmark_json_path)
+        evaluation_files: List of tuples (model_name, evaluation_json_path)
         output_path: Optional path to save comparison CSV
         
     Returns:
@@ -2237,7 +2966,7 @@ def compare_benchmark_results(benchmark_files, output_path=None):
     
     comparison_rows = []
     
-    for model_name, filepath in benchmark_files:
+    for model_name, filepath in evaluation_files:
         try:
             with open(filepath, 'r') as f:
                 results = json.load(f)
@@ -2282,17 +3011,17 @@ def compare_benchmark_results(benchmark_files, output_path=None):
     
     if output_path:
         comparison_df.to_csv(output_path, index=False)
-        print(f"[OK] Benchmark comparison saved to: {output_path}")
+        print(f"[OK] Evaluation comparison saved to: {output_path}")
     
     return comparison_df
 
 
-def generate_benchmark_latex_table(comparison_df, output_path=None, caption="Explainability Benchmark Comparison"):
+def generate_evaluation_latex_table(comparison_df, output_path=None, caption="Explainability Evaluation Comparison"):
     """
-    Generate LaTeX table for benchmark comparison (useful for research papers).
+    Generate LaTeX table for evaluation comparison (useful for research papers).
     
     Args:
-        comparison_df: DataFrame from compare_benchmark_results()
+        comparison_df: DataFrame from compare_evaluation_results()
         output_path: Optional path to save .tex file
         caption: Table caption
         
@@ -2328,7 +3057,7 @@ def generate_benchmark_latex_table(comparison_df, output_path=None, caption="Exp
     latex = f"""\\begin{{table}}[htbp]
 \\centering
 \\caption{{{caption}}}
-\\label{{tab:explainability_benchmark}}
+\\label{{tab:explainability_evaluation}}
 {latex}
 \\end{{table}}"""
     

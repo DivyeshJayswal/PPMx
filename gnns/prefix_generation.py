@@ -24,6 +24,8 @@ def detect_columns(df: pd.DataFrame):
     
     if 'org:resource' in df.columns:
         col_map['org:resource'] = 'Resource'
+    elif 'org:group' in df.columns:
+        col_map['org:group'] = 'Resource'
     elif 'Resource' in df.columns:
         col_map['Resource'] = 'Resource'
     

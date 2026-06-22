@@ -87,6 +87,10 @@ def _signed_log1p(value):
 def build_graph(prefix: pd.DataFrame, vocabs, trace_attributes):
     data = HeteroData()
     k = len(prefix)
+    if "CaseID" in prefix.columns:
+        data.case_id = str(prefix.iloc[0]["CaseID"])
+    if "prefix_id" in prefix.columns:
+        data.prefix_id = int(prefix.iloc[0]["prefix_id"])
 
     act_map = vocabs["Activity"]
     res_map = vocabs["Resource"]
@@ -110,6 +114,12 @@ def build_graph(prefix: pd.DataFrame, vocabs, trace_attributes):
         prefix["__ts_log"].to_numpy(),
         dtype=torch.float32
     ).unsqueeze(1)
+    prefix_times = pd.to_datetime(prefix["Timestamp"])
+    prefix_start = prefix_times.iloc[0]
+    relative_seconds = (
+        (prefix_times - prefix_start).dt.total_seconds().to_numpy(dtype=np.float32)
+    )
+    data["time"].display_seconds = torch.tensor(relative_seconds, dtype=torch.float32)
 
     trace_features = []
     first = prefix.iloc[0]
