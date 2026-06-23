@@ -2,7 +2,7 @@
 
 <img src="frontend/src/assets/ppmx.svg" alt="PPMx Logo" width="380"/>
 
-<br/><br/>
+<br/>
 
 [![release](https://img.shields.io/badge/release-v1.0.0-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
