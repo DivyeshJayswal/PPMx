@@ -17,14 +17,14 @@
 
 </div>
 
-> **PPMX** is a no-code platform for Predictive Process Monitoring (PPM). It provides an end-to-end pipeline from event log preprocessing to model training, explainability, and evaluation supporting **Transformer** and **Graph Neural Network (GNN)** architectures through a browser-based dashboard with no scripting required.
+> **PPMx** is a no-code platform for Predictive Process Monitoring (PPM). It provides an end-to-end pipeline from event log preprocessing to model training, explainability, and evaluation supporting **Transformer** and **Graph Neural Network (GNN)** architectures through a browser-based dashboard with no scripting required.
 
 🌐 **Live:** https://ppmx.app/
 
 ---
 
-**PPMX Architecture**
-![PPMX Architecture](frontend/src/assets/PPMx_view_arch.png)
+**PPMx Architecture**
+![PPMx Architecture](frontend/src/assets/PPMx_view_arch.png)
 
 **Key Features**
 - No-code workflow for training and explainability.
@@ -38,12 +38,12 @@
 - Backend: FastAPI + Python
 - ML: TensorFlow, PyTorch, PyTorch Geometric
 
-**PPMX System Structure and APIs**
+**PPMx System Structure and APIs**
 This diagram summarizes the frontend-backend structure and the APIs used across the system.
 ![System Structure](frontend/src/assets/system_structure.png)
 
-**PPMX Workflow**
-![PPMX Workflow](frontend/src/assets/PPMx_updated_arch.png)
+**PPMx Workflow**
+![PPMx Workflow](frontend/src/assets/PPMx_updated_arch.png)
 
 **Requirements**
 - Python 3.10+ recommended
@@ -101,7 +101,7 @@ npm run dev
 Frontend will be available at `http://localhost:5173`.
 
 **Starting Dashboard**
-![PPMX Dashboard](frontend/src/assets/ppmx_updated_landing_page.png)
+![PPMx Dashboard](frontend/src/assets/ppmx_updated_landing_page.png)
 
 **Sample Datasets**
 These sample event logs are available from the Dataset Setup step in the UI and can be downloaded from here:
