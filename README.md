@@ -1,9 +1,30 @@
-# PPMX (Predictive Process Monitoring Explainer)
+<div align="center">
 
-PPMX (Predictive Process Monitoring Explainer) is a tool for Predictive Process Monitoring (PPM) which provides fast and easy No Code solution for process prediction and explainability to black box models like Transformer and Graph Neural Networks (GNNs) with explainability and evaluation. It is designed for experimentation on event logs, and allows users to train models, inspect results, and compare explainability methods in a single workflow.
+<img src="frontend/src/assets/ppmx.svg" alt="PPMx Logo" width="380"/>
+
+<br/><br/>
+
+[![release](https://img.shields.io/badge/release-v1.0.0-blue)]()
+[![license](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
+[![status](https://img.shields.io/badge/status-research-blueviolet)]()
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)]()
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)]()
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.20-FF6F00?logo=tensorflow&logoColor=white)]()
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.9-EE4C2C?logo=pytorch&logoColor=white)]()
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)]()
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)]()
+
+</div>
+
+> **PPMX** is a no-code platform for Predictive Process Monitoring (PPM). It provides an end-to-end pipeline from event log preprocessing to model training, explainability, and evaluation supporting **Transformer** and **Graph Neural Network (GNN)** architectures through a browser-based dashboard with no scripting required.
+
+🌐 **Live:** https://ppmx.app/
+
+---
 
 **PPMX Architecture**
-![PPMX Architecture](frontend/src/assets/ppmx_software_architecture_updated.png)
+![PPMX Architecture](frontend/src/assets/PPMx_view_arch.png)
 
 **Key Features**
 - No-code workflow for training and explainability.
@@ -20,6 +41,9 @@ PPMX (Predictive Process Monitoring Explainer) is a tool for Predictive Process 
 **PPMX System Structure and APIs**
 This diagram summarizes the frontend-backend structure and the APIs used across the system.
 ![System Structure](frontend/src/assets/system_structure.png)
+
+**PPMX Workflow**
+![PPMX Workflow](frontend/src/assets/PPMx_updated_arch.png)
 
 **Requirements**
 - Python 3.10+ recommended
@@ -77,12 +101,7 @@ npm run dev
 Frontend will be available at `http://localhost:5173`.
 
 **Starting Dashboard**
-![PPMX Dashboard](frontend/src/assets/PPMX_start.png)
-
-**Hosted Version**
-```
-https://explainability-bedf8.web.app/
-```
+![PPMX Dashboard](frontend/src/assets/ppmx_updated_landing_page.png)
 
 **Sample Datasets**
 These sample event logs are available from the Dataset Setup step in the UI and can be downloaded from here:
@@ -118,4 +137,4 @@ These sample event logs are available from the Dataset Setup step in the UI and 
 - If training is slow, reduce dataset size or use a GPU-enabled environment.
 
 **License**
-Open source for educational use.
+This project is licensed under the [MIT License](LICENSE) - free to use, modify, and distribute with attribution.
