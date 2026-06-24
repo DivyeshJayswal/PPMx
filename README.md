@@ -24,7 +24,7 @@
 ---
 
 **PPMx Architecture**
-![PPMx Architecture](frontend/src/assets/PPMx_view_arch.png)
+![PPMx Workflow](frontend/src/assets/PPMx_updated_arch.png)
 
 **Key Features**
 - No-code workflow for training and explainability.
@@ -41,9 +41,6 @@
 **PPMx System Structure and APIs**
 This diagram summarizes the frontend-backend structure and the APIs used across the system.
 ![System Structure](frontend/src/assets/system_structure.png)
-
-**PPMx Workflow**
-![PPMx Workflow](frontend/src/assets/PPMx_updated_arch.png)
 
 **Requirements**
 - Python 3.10+ recommended
