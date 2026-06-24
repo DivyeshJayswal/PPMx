@@ -17,7 +17,7 @@
 
 </div>
 
-> **PPMx** is a no-code platform for Predictive Process Monitoring (PPM). It provides an end-to-end pipeline from event log preprocessing to model training, explainability, and evaluation supporting **Transformer** and **Graph Neural Network (GNN)** architectures through a browser-based dashboard with no scripting required.
+> **PPMx** is a no-code platform for Predictive Process Monitoring (PPM). It provides an end-to-end pipeline from event log preprocessing to model training, explainability, and evaluation supporting **Transformer** and **Graph Neural Network (GNN)** architectures through a browser-based dashboard with no scripting required. The tool supports the publication 'PPMx: a Predictive Process Monitoring Workbench'.
 
 🌐 **Live:** https://ppmx.app/
 
