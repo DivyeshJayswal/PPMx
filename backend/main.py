@@ -4,6 +4,7 @@ import sys
 import uuid
 import json
 import shutil
+import signal
 import subprocess
 import zipfile
 from urllib.parse import parse_qs, urlparse
@@ -1248,16 +1249,19 @@ def create_run(req: RunCreateRequest):
     log_path = os.path.join(rdir, "logs.txt")
     with open(log_path, "a", encoding="utf-8") as log:
         # Important: run module with repo root as cwd so "backend.*" imports resolve
+        # os.setsid creates a new process group so we can kill the whole tree on cancel
         proc = subprocess.Popen(
             [PYTHON_EXEC, "-m", "backend.runner.run_job", "--run-dir", rdir],
             stdout=log,
             stderr=log,
             cwd=REPO_ROOT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            preexec_fn=os.setsid,
         )
 
-    # Save pid
+    # Save pid and pgid so cancel can kill the whole process group (including SHAP workers)
     status_obj["pid"] = proc.pid
+    status_obj["pgid"] = os.getpgid(proc.pid)
     status_obj["updated_at"] = _utc_now()
     _write_json(_run_status_path(run_id), status_obj)
 
@@ -1271,6 +1275,64 @@ def get_run(run_id: str):
     """
     status = _load_run_status(run_id)
     return RunStatus(**status)
+
+
+@app.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str):
+    """
+    Cancel a running job by killing its entire process group.
+    Safe to call on already-finished runs (no-op).
+    """
+    status_path = _run_status_path(run_id)
+    if not os.path.exists(status_path):
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    status = _read_json(status_path)
+    current_status = status.get("status", "")
+
+    # If already terminal, nothing to do
+    if current_status in {"succeeded", "failed", "cancelled"}:
+        return {"run_id": run_id, "status": current_status, "detail": "already terminal"}
+
+    pgid = status.get("pgid")
+    pid = status.get("pid")
+
+    killed = False
+    if pgid:
+        try:
+            os.killpg(int(pgid), signal.SIGKILL)
+            killed = True
+        except ProcessLookupError:
+            pass  # process already dead
+        except PermissionError as e:
+            raise HTTPException(status_code=500, detail=f"Could not kill process group: {e}")
+    elif pid:
+        # Fallback: kill just the pid if pgid wasn't saved (old runs)
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+            killed = True
+        except ProcessLookupError:
+            pass
+
+    # Update status.json to reflect cancellation
+    status["status"] = "cancelled"
+    status["finished_at"] = _utc_now()
+    status["updated_at"] = _utc_now()
+    status["error"] = "Cancelled by user"
+    _write_json(status_path, status)
+
+    # Also update artifacts/summary.json if it exists
+    summary_path = os.path.join(_run_artifacts_dir(run_id), "summary.json")
+    if os.path.exists(summary_path):
+        try:
+            summary = _read_json(summary_path)
+            summary["status"] = "cancelled"
+            summary["finished_at"] = _utc_now()
+            _write_json(summary_path, summary)
+        except Exception:
+            pass
+
+    return {"run_id": run_id, "status": "cancelled", "killed": killed}
 
 
 @app.get("/runs/{run_id}/logs")

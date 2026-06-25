@@ -2,6 +2,8 @@
 import argparse
 import json
 import os
+import signal
+import sys
 import traceback
 from datetime import datetime
 from typing import Any, Dict
@@ -124,6 +126,25 @@ def main():
     status_path = os.path.join(run_dir, "status.json")
     artifacts_dir = os.path.join(run_dir, "artifacts")
     os.makedirs(artifacts_dir, exist_ok=True)
+
+    # --- Graceful cancellation: write status before dying on SIGTERM/SIGKILL ---
+    # SIGKILL cannot be caught, but SIGTERM can. main.py sends SIGKILL to the
+    # process group, so this handler won't fire for SIGKILL. It's here as a
+    # belt-and-suspenders fallback if someone sends a polite SIGTERM first.
+    def _handle_cancel(signum, frame):
+        try:
+            patch_status(status_path, status="cancelled", finished_at=utc_now(), error="Cancelled by user")
+            summary_path = os.path.join(artifacts_dir, "summary.json")
+            if os.path.exists(summary_path):
+                summary = read_json(summary_path)
+                summary["status"] = "cancelled"
+                summary["finished_at"] = utc_now()
+                write_json(summary_path, summary)
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_cancel)
 
     req = read_json(request_path)
     run_id = req["run_id"]
