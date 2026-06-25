@@ -91,14 +91,14 @@ class EventTimePredictor:
             seq_test, X_temp_test, y_test, time_test = build_samples(test_df)
 
             X_seq_train = keras.preprocessing.sequence.pad_sequences(
-                seq_train, maxlen=self.max_len, padding='pre', value=0
-            ) + 1
+                [np.asarray(seq) + 1 for seq in seq_train], maxlen=self.max_len, padding='pre', value=0
+            )
             X_seq_val = keras.preprocessing.sequence.pad_sequences(
-                seq_val, maxlen=self.max_len, padding='pre', value=0
-            ) + 1
+                [np.asarray(seq) + 1 for seq in seq_val], maxlen=self.max_len, padding='pre', value=0
+            )
             X_seq_test = keras.preprocessing.sequence.pad_sequences(
-                seq_test, maxlen=self.max_len, padding='pre', value=0
-            ) + 1
+                [np.asarray(seq) + 1 for seq in seq_test], maxlen=self.max_len, padding='pre', value=0
+            )
             X_time_train = keras.preprocessing.sequence.pad_sequences(
                 time_train, maxlen=self.max_len, padding='pre', value=0
             )
@@ -118,8 +118,8 @@ class EventTimePredictor:
             print(f"Example sequence length range: {min(map(len, sequences))} to {max(map(len, sequences))}")
 
             X_seq = keras.preprocessing.sequence.pad_sequences(
-                sequences, maxlen=self.max_len, padding='pre', value=0
-            ) + 1
+                [np.asarray(seq) + 1 for seq in sequences], maxlen=self.max_len, padding='pre', value=0
+            )
             X_time = keras.preprocessing.sequence.pad_sequences(
                 time_seq, maxlen=self.max_len, padding='pre', value=0
             )

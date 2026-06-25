@@ -68,12 +68,11 @@ class NextActivityPredictor:
         self.label_encoder.fit(process_data['activity'])
         
         def encode_sequences(sequences, next_activities):
-            X_encoded = [self.label_encoder.transform(seq) for seq in sequences]
+            X_encoded = [self.label_encoder.transform(seq) + 1 for seq in sequences]
             y_encoded = self.label_encoder.transform(next_activities)
             X = keras.preprocessing.sequence.pad_sequences(
                 X_encoded, maxlen=self.max_len, padding='pre', value=0
             )
-            X = X + 1
             y = y_encoded + 1
             return X, y
 
